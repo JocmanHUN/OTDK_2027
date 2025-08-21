@@ -12,22 +12,14 @@ from src.domain.interfaces.context import ModelContext
 from src.domain.interfaces.enums import PredictionStatus
 from src.domain.interfaces.modeling import BasePredictiveModel
 from src.domain.interfaces.strategies import BaseStrategy
-from src.domain.value_objects.enums import (
-    MatchStatus,
-    ModelName,
-    Outcome,
-    StrategyName,
-)
-from src.domain.value_objects.enums import (
-    PredictionStatus as PredictionStatusVO,
-)
+from src.domain.value_objects import enums as voe
 from src.domain.value_objects.ids import BookmakerId, FixtureId, LeagueId
 from src.domain.value_objects.money import Money
 from src.domain.value_objects.probability_triplet import ProbabilityTriplet
 
 
 class DummyAlwaysHome(BasePredictiveModel):
-    name = ModelName.POISSON
+    name = voe.ModelName.POISSON
     version = "0"
 
     def predict(self, match: Match, ctx: ModelContext) -> Prediction:
@@ -38,12 +30,12 @@ class DummyAlwaysHome(BasePredictiveModel):
             probs=probs,
             computed_at_utc=datetime.now(timezone.utc),
             version=self.version,
-            status=PredictionStatusVO(PredictionStatus.OK.value),
+            status=voe.PredictionStatus(PredictionStatus.OK.value),
         )
 
 
 class Flat1Unit(BaseStrategy):
-    name = StrategyName.FLAT
+    name = voe.StrategyName.FLAT
     version = "1.0"
 
     def run(
@@ -52,11 +44,11 @@ class Flat1Unit(BaseStrategy):
         bankroll: Money,
         odds: Odds,
         prediction: Prediction,
-        outcome: Outcome | None = None,
+        outcome: voe.Outcome | None = None,
         step_index: int = 0,
     ) -> StrategyResult:
         stake = Money(amount=Decimal("1"), currency=bankroll.currency)
-        target = Outcome.HOME
+        target = voe.Outcome.HOME
         result: Literal["WIN", "LOSE", "VOID"] | None
         if outcome == target:
             result = "WIN"
@@ -90,7 +82,7 @@ def test_dummy_model_and_strategy() -> None:
         kickoff_utc=datetime.now(timezone.utc),
         home_name="A",
         away_name="B",
-        status=MatchStatus.SCHEDULED,
+        status=voe.MatchStatus.SCHEDULED,
     )
     ctx = ModelContext(fixture_id=match.fixture_id, league_id=match.league_id, season=match.season)
     model = DummyAlwaysHome()
@@ -106,6 +98,6 @@ def test_dummy_model_and_strategy() -> None:
     )
     strat = Flat1Unit()
     bankroll = Money(amount=Decimal("10"))
-    result = strat.run(bankroll=bankroll, odds=odds, prediction=pred, outcome=Outcome.HOME)
+    result = strat.run(bankroll=bankroll, odds=odds, prediction=pred, outcome=voe.Outcome.HOME)
     assert isinstance(result, StrategyResult)
     assert result.bankroll_after.amount > bankroll.amount
