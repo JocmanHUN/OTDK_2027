@@ -1,7 +1,6 @@
 # OTDK 2027 – Sports Betting Analysis
 
-[![codecov](https://codecov.io/gh/OWNER/REPO/branch/main/graph/badge.svg)](https://codecov.io/gh/OWNER/REPO)
-
+[![codecov](https://codecov.io/gh/JocmanHUN/OTDK_2027/branch/main/graph/badge.svg)](https://codecov.io/gh/JocmanHUN/OTDK_2027)
 **Dolgozat címe:**  
 *A sportfogadás nyereségességének vizsgálata valószínűségi modellek és fogadási stratégiák együttes alkalmazásával*
 
