@@ -1,6 +1,19 @@
 from enum import Enum
 
 
+class MatchStatus(str, Enum):
+    SCHEDULED = "SCHEDULED"
+    LIVE = "LIVE"
+    FINISHED = "FINISHED"
+    POSTPONED = "POSTPONED"
+    CANCELED = "CANCELED"
+
+
+class PredictionStatus(str, Enum):
+    OK = "OK"
+    SKIPPED = "SKIPPED"
+
+
 class ModelName(str, Enum):
     POISSON = "poisson"
     MONTE_CARLO = "monte_carlo"
