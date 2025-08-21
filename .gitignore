@@ -6,6 +6,7 @@ __pycache__/
 *.egg-info/
 .eggs/
 *.sqlite3
+otdk.db
 
 # Virtual env
 .venv/
