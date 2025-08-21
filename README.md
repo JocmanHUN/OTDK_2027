@@ -53,6 +53,8 @@ A program:
 ---
 
 ## 📂 Mappastruktúra (terv)
+
+```
 OTDK_2027/
 │ README.md
 │ requirements.txt
@@ -68,6 +70,7 @@ OTDK_2027/
 ├─ tests/
 └─ docs/
 
+```
 ---
 
 ## 👨‍🎓 Szerző
