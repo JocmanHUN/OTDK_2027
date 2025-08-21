@@ -1,3 +1,6 @@
++50
+-0
+
 -- Base schema migration
 
 PRAGMA foreign_keys = ON;
@@ -15,7 +18,7 @@ CREATE TABLE bookmakers (
 
 CREATE TABLE matches (
     match_id    INTEGER PRIMARY KEY,
-    league_id   INTEGER,
+    league_id   INTEGER NOT NULL,
     season      INTEGER NOT NULL,
     date        DATETIME NOT NULL,
     home_team   TEXT NOT NULL,
@@ -26,8 +29,8 @@ CREATE TABLE matches (
 
 CREATE TABLE odds (
     odds_id       INTEGER PRIMARY KEY,
-    match_id      INTEGER,
-    bookmaker_id  INTEGER,
+    match_id      INTEGER NOT NULL,
+    bookmaker_id  INTEGER NOT NULL,
     odds_home     REAL NOT NULL,
     odds_draw     REAL NOT NULL,
     odds_away     REAL NOT NULL,
@@ -37,14 +40,13 @@ CREATE TABLE odds (
 
 CREATE TABLE predictions (
     prediction_id    INTEGER PRIMARY KEY,
-    match_id         INTEGER,
+    match_id         INTEGER NOT NULL,
     model_name       TEXT NOT NULL,
     prob_home        REAL NOT NULL CHECK(prob_home BETWEEN 0 AND 1),
     prob_draw        REAL NOT NULL CHECK(prob_draw BETWEEN 0 AND 1),
     prob_away        REAL NOT NULL CHECK(prob_away BETWEEN 0 AND 1),
     predicted_result TEXT NOT NULL CHECK(predicted_result IN ('1','X','2')),
-    is_correct       BOOLEAN,
+    is_correct       BOOLEAN CHECK(is_correct IN (0,1)),
     FOREIGN KEY (match_id) REFERENCES matches(match_id),
     CHECK (prob_home + prob_draw + prob_away = 1)
 );
-
