@@ -60,7 +60,7 @@ OTDK_2027/
 │ requirements.txt
 │ pyproject.toml
 │ .gitignore
-│
+├─ assets/
 ├─ src/
 │ ├─ app/
 │ ├─ domain/
