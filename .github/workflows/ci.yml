@@ -37,7 +37,8 @@ jobs:
 
       - name: Test
         run: |
-          python -m pytest --cov=src --cov-report=xml --cov-report=term
+          # Coverage options are configured in pyproject.toml
+          python -m pytest --cov-report=term
 
       # ⬇️ Egyedi név, így nincs 409 Conflict több mátrix-jobnál sem
       - name: Upload coverage report
@@ -50,12 +51,9 @@ jobs:
 
       # ⬇️ Codecov: public repo esetén token nem kell; privátnál add meg a secretek közt
       - name: Upload coverage to Codecov
-        if: always()
+        if: success() && hashFiles('coverage.xml') != ''
         uses: codecov/codecov-action@v4
         with:
           files: coverage.xml
           flags: py-${{ matrix.python-version }}
           fail_ci_if_error: true
-        env:
-          # Public repo: töröld ezt a sort
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
