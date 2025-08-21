@@ -22,9 +22,7 @@ class BookmakersRepoSqlite(BookmakersRepo):
         self._conn.commit()
 
     def get_by_id(self, bookmaker_id: int) -> Optional[Bookmaker]:
-        cur = self._conn.execute(
-            "SELECT id, name FROM bookmakers WHERE id = ?", (bookmaker_id,)
-        )
+        cur = self._conn.execute("SELECT id, name FROM bookmakers WHERE id = ?", (bookmaker_id,))
         row = cur.fetchone()
         if row:
             return Bookmaker(*row)
@@ -37,9 +35,7 @@ class BookmakersRepoSqlite(BookmakersRepo):
         return [Bookmaker(*row) for row in cur.fetchall()]
 
     def insert(self, bookmaker: Bookmaker) -> int:
-        cur = self._conn.execute(
-            "INSERT INTO bookmakers (name) VALUES (?)", (bookmaker.name,)
-        )
+        cur = self._conn.execute("INSERT INTO bookmakers (name) VALUES (?)", (bookmaker.name,))
         self._conn.commit()
         return cur.lastrowid
 

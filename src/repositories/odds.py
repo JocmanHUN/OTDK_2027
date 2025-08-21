@@ -23,9 +23,7 @@ class OddsRepo(ABC):
         """Return odds by identifier if present."""
 
     @abstractmethod
-    def list_by_match(
-        self, match_id: int, *, limit: int = 100, offset: int = 0
-    ) -> list[Odds]:
+    def list_by_match(self, match_id: int, *, limit: int = 100, offset: int = 0) -> list[Odds]:
         """List odds entries for a given match."""
 
     @abstractmethod

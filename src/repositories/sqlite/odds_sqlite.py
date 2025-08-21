@@ -43,9 +43,7 @@ class OddsRepoSqlite(OddsRepo):
             return Odds(*row)
         return None
 
-    def list_by_match(
-        self, match_id: int, *, limit: int = 100, offset: int = 0
-    ) -> list[Odds]:
+    def list_by_match(self, match_id: int, *, limit: int = 100, offset: int = 0) -> list[Odds]:
         cur = self._conn.execute(
             "SELECT id, match_id, bookmaker_id, home, draw, away FROM odds WHERE match_id = ? LIMIT ? OFFSET ?",
             (match_id, limit, offset),

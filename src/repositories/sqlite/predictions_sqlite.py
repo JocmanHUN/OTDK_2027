@@ -62,13 +62,13 @@ class PredictionsRepoSqlite(PredictionsRepo):
             INSERT INTO predictions (match_id, prob_home, prob_draw, prob_away, is_correct)
             VALUES (?, ?, ?, ?, ?)
             """,
-        (
-            prediction.match_id,
-            prediction.prob_home,
-            prediction.prob_draw,
-            prediction.prob_away,
-            int(prediction.is_correct) if prediction.is_correct is not None else None,
-        ),
+            (
+                prediction.match_id,
+                prediction.prob_home,
+                prediction.prob_draw,
+                prediction.prob_away,
+                int(prediction.is_correct) if prediction.is_correct is not None else None,
+            ),
         )
         self._conn.commit()
         return cur.lastrowid
