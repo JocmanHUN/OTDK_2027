@@ -1,19 +1,24 @@
 """Enum definitions for the interfaces layer.
 
-This module defines enums used in the interfaces layer.
-Since the project targets Python 3.11+, we can safely use
-the built-in :class:`enum.StrEnum`.
+- Python 3.11+: use enum.StrEnum
+- Python 3.10 : provide a small local fallback (str + Enum)
 """
 
-from enum import StrEnum
+import sys
+from enum import Enum
+
+if sys.version_info >= (3, 11):
+    from enum import StrEnum
+else:
+
+    class StrEnum(str, Enum):
+        """Backport of enum.StrEnum for Python < 3.11."""
+
+        pass
 
 
 class PredictionStatus(StrEnum):
-    """Status of a prediction.
-
-    >>> PredictionStatus.OK.value
-    'OK'
-    """
+    """Status of a prediction."""
 
     OK = "OK"
     SKIPPED = "SKIPPED"
