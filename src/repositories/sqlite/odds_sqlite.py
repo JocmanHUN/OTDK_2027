@@ -45,7 +45,12 @@ class OddsRepoSqlite(OddsRepo):
 
     def list_by_match(self, match_id: int, *, limit: int = 100, offset: int = 0) -> list[Odds]:
         cur = self._conn.execute(
-            "SELECT id, match_id, bookmaker_id, home, draw, away FROM odds WHERE match_id = ? LIMIT ? OFFSET ?",
+            """
+            SELECT id, match_id, bookmaker_id, home, draw, away
+            FROM odds
+            WHERE match_id = ?
+            LIMIT ? OFFSET ?
+            """,
             (match_id, limit, offset),
         )
         return [Odds(*row) for row in cur.fetchall()]
@@ -56,7 +61,10 @@ class OddsRepoSqlite(OddsRepo):
             (odds.match_id, odds.bookmaker_id, odds.home, odds.draw, odds.away),
         )
         self._conn.commit()
-        return cur.lastrowid
+        rowid = cur.lastrowid
+        if rowid is None:
+            raise RuntimeError("SQLite insert failed: no lastrowid (table: odds)")
+        return int(rowid)
 
     def update(self, odds: Odds) -> None:
         self._conn.execute(
@@ -70,6 +78,7 @@ class OddsRepoSqlite(OddsRepo):
         self._conn.commit()
 
     def best_odds(self, match_id: int) -> dict[str, tuple[int, float]]:
+        """Return the best (bookmaker_id, odd) per outcome key '1', 'X', '2'."""
         cur = self._conn.execute(
             "SELECT bookmaker_id, home, draw, away FROM odds WHERE match_id = ?",
             (match_id,),
@@ -77,9 +86,9 @@ class OddsRepoSqlite(OddsRepo):
         best: dict[str, tuple[int, float]] = {}
         for bookmaker_id, home, draw, away in cur.fetchall():
             if "1" not in best or home > best["1"][1]:
-                best["1"] = (bookmaker_id, home)
+                best["1"] = (bookmaker_id, float(home))
             if "X" not in best or draw > best["X"][1]:
-                best["X"] = (bookmaker_id, draw)
+                best["X"] = (bookmaker_id, float(draw))
             if "2" not in best or away > best["2"][1]:
-                best["2"] = (bookmaker_id, away)
+                best["2"] = (bookmaker_id, float(away))
         return best

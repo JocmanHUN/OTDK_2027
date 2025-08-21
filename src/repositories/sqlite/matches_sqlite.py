@@ -64,7 +64,10 @@ class MatchesRepoSqlite(MatchesRepo):
             (match.league_id, match.season, match.home_team, match.away_team, match.real_result),
         )
         self._conn.commit()
-        return cur.lastrowid
+        rowid = cur.lastrowid
+        if rowid is None:
+            raise RuntimeError("SQLite insert failed: no lastrowid (table: matches)")
+        return int(rowid)
 
     def update_result(self, match_id: int, real_result: str) -> None:
         if real_result not in {"1", "X", "2"}:

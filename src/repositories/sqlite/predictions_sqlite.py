@@ -27,13 +27,19 @@ class PredictionsRepoSqlite(PredictionsRepo):
 
     def get_by_id(self, prediction_id: int) -> Optional[Prediction]:
         cur = self._conn.execute(
-            "SELECT id, match_id, prob_home, prob_draw, prob_away, is_correct FROM predictions WHERE id = ?",
+            "SELECT id, match_id, prob_home, prob_draw, prob_away, is_correct "
+            "FROM predictions WHERE id = ?",
             (prediction_id,),
         )
         row = cur.fetchone()
         if row:
             return Prediction(
-                row[0], row[1], row[2], row[3], row[4], bool(row[5]) if row[5] is not None else None
+                row[0],
+                row[1],
+                row[2],
+                row[3],
+                row[4],
+                bool(row[5]) if row[5] is not None else None,
             )
         return None
 
@@ -43,13 +49,22 @@ class PredictionsRepoSqlite(PredictionsRepo):
         cur = self._conn.execute(
             """
             SELECT id, match_id, prob_home, prob_draw, prob_away, is_correct
-            FROM predictions WHERE match_id = ? LIMIT ? OFFSET ?
+            FROM predictions
+            WHERE match_id = ?
+            LIMIT ? OFFSET ?
             """,
             (match_id, limit, offset),
         )
         rows = cur.fetchall()
         return [
-            Prediction(r[0], r[1], r[2], r[3], r[4], bool(r[5]) if r[5] is not None else None)
+            Prediction(
+                r[0],
+                r[1],
+                r[2],
+                r[3],
+                r[4],
+                bool(r[5]) if r[5] is not None else None,
+            )
             for r in rows
         ]
 
@@ -57,6 +72,7 @@ class PredictionsRepoSqlite(PredictionsRepo):
         total = prediction.prob_home + prediction.prob_draw + prediction.prob_away
         if abs(total - 1.0) > 1e-9:
             raise ValueError("Probabilities must sum to 1")
+
         cur = self._conn.execute(
             """
             INSERT INTO predictions (match_id, prob_home, prob_draw, prob_away, is_correct)
@@ -71,7 +87,11 @@ class PredictionsRepoSqlite(PredictionsRepo):
             ),
         )
         self._conn.commit()
-        return cur.lastrowid
+
+        rowid = cur.lastrowid
+        if rowid is None:
+            raise RuntimeError("SQLite insert failed: no lastrowid (table: predictions)")
+        return int(rowid)
 
     def update(self, prediction: Prediction) -> None:
         total = prediction.prob_home + prediction.prob_draw + prediction.prob_away

@@ -37,7 +37,10 @@ class BookmakersRepoSqlite(BookmakersRepo):
     def insert(self, bookmaker: Bookmaker) -> int:
         cur = self._conn.execute("INSERT INTO bookmakers (name) VALUES (?)", (bookmaker.name,))
         self._conn.commit()
-        return cur.lastrowid
+        rowid = cur.lastrowid
+        if rowid is None:
+            raise RuntimeError("SQLite insert failed: no lastrowid (table: bookmakers)")
+        return int(rowid)
 
     def update(self, bookmaker: Bookmaker) -> None:
         self._conn.execute(
