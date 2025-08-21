@@ -53,3 +53,23 @@ A program:
 ---
 
 ## 📂 Mappastruktúra (terv)
+OTDK_2027/
+│ README.md
+│ requirements.txt
+│ pyproject.toml
+│ .gitignore
+│
+├─ src/
+│ ├─ app/
+│ ├─ domain/
+│ ├─ infra/
+│ ├─ ui/
+│
+├─ tests/
+└─ docs/
+
+---
+
+## 👨‍🎓 Szerző
+Pál József Gergő – EKKE / ELTE  
+OTDK 2027
