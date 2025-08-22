@@ -26,11 +26,10 @@ repos:
     hooks:
       - id: pytest
         name: pytest
-        entry: pytest -q --maxfail=1 --disable-warnings --cov=. --cov-report=term
+        entry: pytest --maxfail=1 --disable-warnings --cov=. --cov-report=term-missing
         language: python
         types: [python]
         pass_filenames: false
-        exclude: "coverage.xml|.pytest_cache"
         additional_dependencies:
           - pytest==8.2.0
           - pytest-cov==5.0.0
