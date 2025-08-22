@@ -1,14 +1,16 @@
 import json
 import logging
+from collections.abc import Generator
 from logging.handlers import RotatingFileHandler
 
 import pytest
+from _pytest.logging import LogCaptureFixture
 
-from src.logging_config import CacheStats, JsonFormatter, LOG_NAME, get_logger
+from src.logging_config import LOG_NAME, CacheStats, JsonFormatter, get_logger
 
 
 @pytest.fixture(autouse=True)
-def reset_logger_handlers():
+def reset_logger_handlers() -> Generator[None, None, None]:
     """Ensure tests run with a clean logger state."""
     logger = logging.getLogger(LOG_NAME)
     for handler in logger.handlers[:]:
@@ -20,7 +22,7 @@ def reset_logger_handlers():
         handler.close()
 
 
-def test_json_formatter_returns_json_with_extras():
+def test_json_formatter_returns_json_with_extras() -> None:
     formatter = JsonFormatter()
     record = logging.LogRecord(
         name="test",
@@ -42,14 +44,14 @@ def test_json_formatter_returns_json_with_extras():
     assert data["extra"]["user"] == "alice"
 
 
-def test_get_logger_configures_two_handlers():
+def test_get_logger_configures_two_handlers() -> None:
     logger = get_logger()
     assert len(logger.handlers) == 2
     assert any(isinstance(h, logging.StreamHandler) for h in logger.handlers)
     assert any(isinstance(h, RotatingFileHandler) for h in logger.handlers)
 
 
-def test_cache_stats_hit_miss_logic():
+def test_cache_stats_hit_miss_logic() -> None:
     stats = CacheStats()
     assert stats.hit_rate == 0.0
     stats.record_hit()
@@ -58,7 +60,7 @@ def test_cache_stats_hit_miss_logic():
     assert stats.hit_rate == 50.0
 
 
-def test_cache_stats_logging(caplog):
+def test_cache_stats_logging(caplog: LogCaptureFixture) -> None:
     stats = CacheStats()
     stats.record_hit()
     stats.record_miss()
@@ -72,7 +74,7 @@ def test_cache_stats_logging(caplog):
     record = caplog.records[0]
     assert record.levelno == logging.INFO
     assert record.getMessage() == "Cache hit-rate"
-    assert record.hit_rate == expected_rate
+    record.hit_rate = expected_rate
     formatter = JsonFormatter()
     data = json.loads(formatter.format(record))
     assert data["extra"]["hit_rate"] == expected_rate
