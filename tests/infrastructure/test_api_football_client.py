@@ -99,3 +99,88 @@ def test_non_retriable_4xx_raises(monkeypatch: pytest.MonkeyPatch) -> None:
         client.get("status")
 
     assert "400" in str(exc.value)
+
+
+def test_text_response_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_request(
+        method: str, url: str, params: Any | None = None, timeout: float | None = None
+    ) -> _FakeResponse:
+        return _FakeResponse(200, text="OK", headers={"Content-Type": "text/plain"})
+
+    client = APIFootballClient()
+    monkeypatch.setattr(client._session, "request", fake_request)
+
+    data = client.get("status")
+    assert data == "OK"
+
+
+def test_retry_exhaustion_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    seq = [
+        _FakeResponse(500, text="e1", headers={"Content-Type": "text/plain"}),
+        _FakeResponse(500, text="e2", headers={"Content-Type": "text/plain"}),
+        _FakeResponse(500, text="e3", headers={"Content-Type": "text/plain"}),
+    ]
+
+    def fake_request(
+        method: str, url: str, params: Any | None = None, timeout: float | None = None
+    ) -> _FakeResponse:
+        return seq.pop(0)
+
+    client = APIFootballClient(max_retries=2, backoff_factor=0)
+    monkeypatch.setattr(client._session, "request", fake_request)
+    monkeypatch.setattr("time.sleep", lambda s: None)
+
+    with pytest.raises(APIError):
+        client.get("status")
+
+
+def test_retry_after_header_used(monkeypatch: pytest.MonkeyPatch) -> None:
+    seq = [
+        _FakeResponse(429, text="rate", headers={"Retry-After": "2", "Content-Type": "text/plain"}),
+        _FakeResponse(200, json_data={"ok": True}),
+    ]
+
+    sleep_calls: list[float] = []
+
+    def fake_sleep(s: float) -> None:  # noqa: D401
+        sleep_calls.append(s)
+
+    def fake_request(
+        method: str, url: str, params: Any | None = None, timeout: float | None = None
+    ) -> _FakeResponse:
+        return seq.pop(0)
+
+    client = APIFootballClient(max_retries=2, backoff_factor=0)
+    monkeypatch.setattr(client._session, "request", fake_request)
+    monkeypatch.setattr("time.sleep", fake_sleep)
+
+    data = client.get("status")
+    assert data == {"ok": True}
+    assert sleep_calls and abs(sleep_calls[0] - 2.0) < 1e-6
+
+
+def test_backoff_without_retry_after(monkeypatch: pytest.MonkeyPatch) -> None:
+    seq = [
+        _FakeResponse(500, text="err", headers={"Content-Type": "text/plain"}),
+        _FakeResponse(200, json_data={"ok": 1}),
+    ]
+
+    sleeps: list[float] = []
+
+    def fake_sleep(s: float) -> None:
+        sleeps.append(s)
+
+    def fake_request(
+        method: str, url: str, params: Any | None = None, timeout: float | None = None
+    ) -> _FakeResponse:
+        return seq.pop(0)
+
+    client = APIFootballClient(max_retries=2, backoff_factor=0.75)
+    monkeypatch.setattr(client._session, "request", fake_request)
+    monkeypatch.setattr("time.sleep", fake_sleep)
+    monkeypatch.setattr("random.uniform", lambda a, b: 0.0)
+
+    data = client.get("status")
+    assert data == {"ok": 1}
+    # Attempt 0 backoff = backoff_factor * (2**0) = 0.75
+    assert sleeps and abs(sleeps[0] - 0.75) < 1e-6

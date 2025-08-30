@@ -67,3 +67,19 @@ def test_cli_season(
     out = capsys.readouterr().out
     assert "2024" in out  # the sample row has season_year=2024 and should be printed
     assert fake.calls == ["season:2023"]
+
+
+def test_cli_current_empty(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import src.cli.leagues as leagues_cli
+
+    class _EmptyService:
+        def get_current_leagues(self) -> List[dict[str, Any]]:
+            return []
+
+    monkeypatch.setattr(leagues_cli, "LeaguesService", lambda: _EmptyService())
+    rc = leagues_cli.main(["--current"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "No leagues with odds+stats coverage found." in out

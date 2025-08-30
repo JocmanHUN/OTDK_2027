@@ -66,6 +66,37 @@ def test_get_current_leagues_filters_coverage() -> None:
     assert result[0]["has_odds"] and result[0]["has_stats"]
 
 
+def test_current_leagues_country_none_and_no_seasons() -> None:
+    responses = {
+        "leagues?current": _payload(
+            [
+                {  # no seasons
+                    "league": {"id": 5, "name": "NoSeasons"},
+                    "country": {"name": None},
+                },
+                {  # one current season with coverage, country None
+                    "league": {"id": 6, "name": "HasSeason"},
+                    "country": {"name": None},
+                    "seasons": [
+                        {
+                            "year": 2024,
+                            "current": True,
+                            "coverage": {"odds": True, "fixtures": {"statistics": True}},
+                        }
+                    ],
+                },
+            ]
+        )
+    }
+    client = _FakeClient(responses)
+    svc = LeaguesService(client=client, ttl_seconds=60)
+
+    result = svc.get_current_leagues()
+    assert len(result) == 1
+    assert result[0]["league_id"] == 6
+    assert result[0]["country_name"] is None
+
+
 def test_get_leagues_for_season_filters_and_caches() -> None:
     responses = {
         "leagues?season=2023": _payload(
