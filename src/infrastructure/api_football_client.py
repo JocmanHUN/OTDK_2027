@@ -67,11 +67,13 @@ class APIFootballClient:
         url = self._full_url(path)
         attempt = 0
         last_error: Optional[Exception] = None
+        # Normalize params to strings for consistent API behavior
+        norm_params = self._normalize_params(params)
 
         while attempt <= self.max_retries:
             try:
                 resp = self._session.request(
-                    method="GET", url=url, params=params, timeout=self.timeout
+                    method="GET", url=url, params=norm_params, timeout=self.timeout
                 )
 
                 # Success
@@ -149,3 +151,15 @@ class APIFootballClient:
         base: float = float(self.backoff_factor) * float(2**attempt)
         jitter: float = float(random.uniform(0.0, 0.1))
         return float(base + jitter)
+
+    def _normalize_params(self, params: Optional[Mapping[str, Any]]) -> Optional[Mapping[str, Any]]:
+        if params is None:
+            return None
+        out: dict[str, Any] = {}
+        for k, v in params.items():
+            key = str(k)
+            if isinstance(v, (int, float, bool)) or v is None:
+                out[key] = str(v) if v is not None else v
+            else:
+                out[key] = v
+        return out
