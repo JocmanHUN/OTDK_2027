@@ -37,6 +37,7 @@ class FixtureShort(TypedDict):
     season_year: int
     home_id: int | None
     away_id: int | None
+    status: str | None
 
 
 @dataclass
@@ -114,6 +115,14 @@ class SelectionPipeline:
                 )
                 home_id = _to_int_opt(hid)
                 away_id = _to_int_opt(aid)
+                # status short if available (NS/1H/HT/2H/FT)
+                status = None
+                if isinstance(r, Mapping):
+                    fx = r.get("fixture")
+                    if isinstance(fx, Mapping):
+                        st = fx.get("status")
+                        if isinstance(st, Mapping):
+                            status = st.get("short")
                 fixtures.append(
                     FixtureShort(
                         fixture_id=int(fx_id),
@@ -121,6 +130,7 @@ class SelectionPipeline:
                         season_year=ls["season_year"],
                         home_id=home_id,
                         away_id=away_id,
+                        status=status if isinstance(status, str) else None,
                     )
                 )
         return fixtures

@@ -25,6 +25,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Filter fixtures to those that have 1X2 odds",
     )
     p.add_argument(
+        "--not-finished",
+        action="store_true",
+        help="Only keep fixtures that are not finished (status != FT)",
+    )
+    p.add_argument(
         "--print-fixtures",
         action="store_true",
         help="Print fixture lines instead of only the summary",
@@ -58,12 +63,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     fixtures = pipe.list_daily_matches(args.date, leagues, tz_name=str(args.timezone))
+    # Optional: filter by status (not finished)
+    if args.not_finished:
+        fixtures = [f for f in fixtures if f.get("status") != "FT"]
     filtered = pipe.filter_matches_with_1x2_odds(fixtures) if args.with_odds else fixtures
 
-    print(
-        f"leagues={len(leagues)} fixtures={len(fixtures)}"
-        + (f" fixtures_with_odds={len(filtered)}" if args.with_odds else "")
-    )
+    summary = f"leagues={len(leagues)} fixtures={len(fixtures)}"
+    if args.with_odds:
+        summary += f" fixtures_with_odds={len(filtered)}"
+    print(summary)
     if args.print_fixtures:
         print(_fmt_fixtures(filtered))
     return 0
