@@ -90,7 +90,14 @@ class PoissonModel(BasePredictiveModel):
         p_a = _poisson_pmf_vector(float(ctx.away_goal_rate), tol=self.tol, max_k=self.max_goals)
 
         p_home, p_draw, p_away = _outer_sum(p_h, p_a)
-        probs = ProbabilityTriplet(home=p_home, draw=p_draw, away=p_away).normalized()
+        total = p_home + p_draw + p_away
+        if total <= 0:
+            p_home = p_draw = p_away = 1.0 / 3.0
+        else:
+            p_home /= total
+            p_draw /= total
+            p_away /= total
+        probs = ProbabilityTriplet(home=p_home, draw=p_draw, away=p_away)
 
         return Prediction(
             fixture_id=match.fixture_id,
