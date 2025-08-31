@@ -52,6 +52,20 @@ class ContextBuilder:
         away_avg = self.history.get_team_averages(away_team_id, league_id, season)
         mu_home, mu_away = self.history.simple_poisson_means(home_avg, away_avg)
 
+        # Build feature diffs from recent stats for logistic regression models
+        try:
+            from src.application.services.features_service import FeaturesService as _FeatSvc
+
+            feats = _FeatSvc(self.history).build_features(
+                home_team_id=home_team_id,
+                away_team_id=away_team_id,
+                league_id=league_id,
+                season=season,
+                last=10,
+            )
+        except Exception:
+            feats = None
+
         return ModelContext(
             fixture_id=FixtureId(int(fixture_id)),
             league_id=LeagueId(int(league_id)),
@@ -63,7 +77,7 @@ class ContextBuilder:
             elo_home=float(init_elo),
             elo_away=float(init_elo),
             home_advantage=float(home_advantage),
-            features=None,
+            features=feats,
         )
 
 

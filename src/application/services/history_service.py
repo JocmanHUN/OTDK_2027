@@ -214,6 +214,68 @@ class HistoryService:
 
         return collected[:last]
 
+    # --------------------------- League finished fixtures for a season ---------------------------
+    def get_league_finished_fixtures(self, league_id: int, season: int) -> list[dict[str, Any]]:
+        """Return all finished (FT) fixtures for a league and season.
+
+        Each item: {date_utc, home_id, away_id, home_goals, away_goals}
+        """
+        params = {"league": str(int(league_id)), "season": str(int(season)), "status": "FT"}
+        first = self._client.get("fixtures", params)
+
+        items: list[Mapping[str, Any]] = []
+        if isinstance(first, Mapping):
+            resp = first.get("response")
+            if isinstance(resp, list):
+                items.extend(resp)
+
+        # Handle paging if present
+        if isinstance(first, Mapping):
+            paging = first.get("paging")
+            total = 1
+            if isinstance(paging, Mapping):
+                raw_total = paging.get("total")
+                if raw_total is not None:
+                    try:
+                        total = int(raw_total)
+                    except (TypeError, ValueError):
+                        total = 1
+            for page in range(2, total + 1):
+                more_params = dict(params)
+                more_params["page"] = str(page)
+                payload = self._client.get("fixtures", more_params)
+                if isinstance(payload, Mapping):
+                    resp = payload.get("response")
+                    if isinstance(resp, list):
+                        items.extend(resp)
+
+        out: list[dict[str, Any]] = []
+        for item in items:
+            fx = item.get("fixture") or {}
+            teams = item.get("teams") or {}
+            goals = item.get("goals") or {}
+            date_str = fx.get("date")
+            dt = _to_utc(date_str) if isinstance(date_str, str) else datetime.now(timezone.utc)
+            home = teams.get("home") or {}
+            away = teams.get("away") or {}
+            out.append(
+                {
+                    "date_utc": dt,
+                    "home_id": _safe_int(home.get("id")),
+                    "away_id": _safe_int(away.get("id")),
+                    "home_goals": _safe_int(goals.get("home")) or 0,
+                    "away_goals": _safe_int(goals.get("away")) or 0,
+                }
+            )
+
+        # Sort by date for stable ELO traversal
+        def _date_key(r: dict[str, Any]) -> datetime:
+            v = r.get("date_utc")
+            return v if isinstance(v, datetime) else datetime.now(timezone.utc)
+
+        out.sort(key=_date_key)
+        return out
+
     def _fetch_team_fixtures_for_season(
         self, team_id: int, league_id: int, season: int, *, only_finished: bool = True
     ) -> list[dict[str, Any]]:
@@ -274,6 +336,29 @@ class HistoryService:
                         bucket[name] = norm
                 result[int(t_id)] = bucket
         return result
+
+    # --------------------------- Team main league for a season ---------------------------
+    def get_team_main_league(self, team_id: int, season: int) -> int | None:
+        """Infer the league where a team mostly played in a given season.
+
+        Queries fixtures by team+season (no league filter) and returns the most frequent league id.
+        """
+        params = {"team": str(int(team_id)), "season": str(int(season)), "status": "FT"}
+        payload = self._client.get("fixtures", params)
+        counts: dict[int, int] = {}
+        if isinstance(payload, Mapping):
+            resp = payload.get("response")
+            if isinstance(resp, list):
+                for item in resp:
+                    lg = item.get("league") or {}
+                    lid = _safe_int(lg.get("id"))
+                    if lid is None:
+                        continue
+                    counts[int(lid)] = counts.get(int(lid), 0) + 1
+        if not counts:
+            return None
+        # Return league id with max count
+        return max(counts.items(), key=lambda kv: kv[1])[0]
 
 
 def _safe_float(value: Any) -> float:
