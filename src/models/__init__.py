@@ -4,10 +4,12 @@ from typing import List
 
 from src.domain.interfaces.modeling import BasePredictiveModel
 
+from .balance import BalanceModel
 from .elo import EloModel
 from .logistic_regression import LogisticRegressionModel
 from .monte_carlo import MonteCarloModel
 from .poisson import PoissonModel
+from .veto import VetoModel
 
 
 def default_models() -> List[BasePredictiveModel]:
@@ -15,4 +17,11 @@ def default_models() -> List[BasePredictiveModel]:
 
     Extend this list as new models are implemented (total target: 6).
     """
-    return [PoissonModel(), MonteCarloModel(), EloModel(), LogisticRegressionModel()]
+    return [
+        PoissonModel(),
+        MonteCarloModel(),
+        EloModel(),
+        LogisticRegressionModel(),
+        BalanceModel(),
+        VetoModel(),
+    ]
