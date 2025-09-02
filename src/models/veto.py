@@ -56,10 +56,16 @@ def _form_distribution(rows: list[dict], decay_factor: float) -> tuple[float, fl
 class VetoModel(BasePredictiveModel):
     """Asymmetric form combiner with product and weighted-average components.
 
-    Raw components:
-      1: hW * aL  and  avg(hW, aL)
-      X: hD * aD  and  avg(hD, aD)
-      2: aW * hL  and  avg(aW, hL)
+    Parameters
+    - `history`: provider with `get_recent_team_stats(...)` (DI for testing).
+    - `last_n`: number of recent matches to consider (<=0 yields uniform via empty history).
+    - `decay_factor`: exponential decay per step back in time, clamped to [0,1]; 0 treated as 1.
+    - `mul_weight`: weight in [0,1] between product and average; 1=product-only, 0=average-only.
+
+    Raw components
+    - 1: hW * aL, avg(hW, aL)
+    - X: hD * aD, avg(hD, aD)
+    - 2: aW * hL, avg(aW, hL)
     Final raw score = mul_weight * product + (1 - mul_weight) * average.
     """
 

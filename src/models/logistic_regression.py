@@ -28,9 +28,12 @@ def _sigmoid(x: float) -> float:
 class LogisticRegressionModel(BasePredictiveModel):
     """Stats-driven logistic model using recent feature differences.
 
-    - Requires `ctx.features` produced by `FeaturesService` (diff_* keys).
-    - Uses heuristic weights for common football stats; unknown stats get zero weight.
-    - Draw probability increases when the linear score is near zero (close matchup).
+    Parameters
+    - `base_draw`: baseline draw probability at neutral score (clamped within [0, 0.9] at use time).
+    - `draw_sensitivity`: how strongly to increase draw when the matchup is close.
+
+    Inputs
+    - `ctx.features`: mapping with `diff_*` feature names (from `FeaturesService`). Missing -> SKIPPED.
     """
 
     version: ClassVar[str] = "1"
@@ -98,7 +101,8 @@ class LogisticRegressionModel(BasePredictiveModel):
 
         # Draw probability higher for close games around 0.5
         closeness = 1.0 - abs(p_home_raw - 0.5) * 2.0  # in [0,1]
-        p_draw = max(0.0, min(0.6, self.base_draw + self.draw_sensitivity * closeness))
+        base_draw = min(0.9, max(0.0, float(self.base_draw)))
+        p_draw = max(0.0, min(0.6, base_draw + float(self.draw_sensitivity) * closeness))
 
         p_no_draw = max(1e-9, 1.0 - p_draw)
         p_home = p_no_draw * p_home_raw

@@ -61,12 +61,16 @@ def _form_distribution(rows: list[dict], decay_factor: float) -> tuple[float, fl
 class BalanceModel(BasePredictiveModel):
     """Symmetric form-based model using exponential weighting over last N matches.
 
-    - Computes per-team form distribution (W/D/L) with decay.
-    - Combines to 1X2 by symmetric averaging:
-        1: mean(home.W, away.L)
-        X: mean(home.D, away.D)
-        2: mean(away.W, home.L)
-    - Normalizes to sum to 1.
+    Parameters
+    - `history`: provider with `get_recent_team_stats(...)` (DI for testing).
+    - `last_n`: number of recent matches to consider (<=0 yields uniform via empty history).
+    - `decay_factor`: exponential decay per step back in time, clamped to [0,1]; 0 treated as 1.
+
+    Combination
+    - 1: mean(home.W, away.L)
+    - X: mean(home.D, away.D)
+    - 2: mean(away.W, home.L)
+    - Normalized to sum to 1.
     """
 
     name: ClassVar[ModelName] = ModelName.BALANCE

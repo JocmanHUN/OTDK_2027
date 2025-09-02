@@ -61,10 +61,14 @@ def _outer_sum(p_home: Iterable[float], p_away: Iterable[float]) -> tuple[float,
 
 @dataclass
 class PoissonModel(BasePredictiveModel):
-    """MVP Poisson model using independent goal processes.
+    """Independent-goals Poisson model.
 
-    - Uses `ctx.home_goal_rate` and `ctx.away_goal_rate` as lambdas.
-    - Truncates goal distributions adaptively until tail mass < tol.
+    Parameters
+    - `tol`: tail mass tolerance when truncating the Poisson distribution (min 1e-12).
+    - `max_goals`: maximum goals considered per team (min 0).
+
+    Inputs
+    - `ctx.home_goal_rate`, `ctx.away_goal_rate`: non-negative Poisson lambdas; negatives are treated as 0.
     """
 
     name: ClassVar[ModelName] = ModelName.POISSON
@@ -86,8 +90,10 @@ class PoissonModel(BasePredictiveModel):
 
         assert ctx.home_goal_rate is not None and ctx.away_goal_rate is not None
         # Build goal PMFs
-        p_h = _poisson_pmf_vector(float(ctx.home_goal_rate), tol=self.tol, max_k=self.max_goals)
-        p_a = _poisson_pmf_vector(float(ctx.away_goal_rate), tol=self.tol, max_k=self.max_goals)
+        tol = max(1e-12, float(self.tol))
+        max_k = max(0, int(self.max_goals))
+        p_h = _poisson_pmf_vector(float(ctx.home_goal_rate), tol=tol, max_k=max_k)
+        p_a = _poisson_pmf_vector(float(ctx.away_goal_rate), tol=tol, max_k=max_k)
 
         p_home, p_draw, p_away = _outer_sum(p_h, p_a)
         total = p_home + p_draw + p_away

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from math import sqrt
-from typing import ClassVar, Optional
+from typing import ClassVar, Optional, Protocol
 
 from src.application.services.elo_service import EloParams, EloService
 from src.config.league_tiers import get_tier_config
@@ -29,11 +29,26 @@ def _davidson_probs(delta_with_home: float, nu: float) -> tuple[float, float, fl
     return p_home, p_draw, p_away
 
 
+class _EloSvcProto(Protocol):
+    def get_team_rating(self, league_id: int, season: int, team_id: int) -> float: ...
+
+
 @dataclass
 class EloModel(BasePredictiveModel):
+    """Elo-based 1X2 model using the Davidson extension for draws.
+
+    Parameters
+    - `draw_param`: Davidson draw parameter `nu`. If `None`, uses `EloParams().draw_param`.
+    - `elo_service`: optional injected `EloService` for rating retrieval (DI for testing).
+
+    Inputs
+    - `ctx.elo_home`, `ctx.elo_away` (optional): if provided, used directly; otherwise fetched via service.
+    - `ctx.home_team_id`, `ctx.away_team_id`: required when fetching from service; missing -> SKIPPED.
+    """
+
     version: ClassVar[str] = "1"
     draw_param: Optional[float] = None  # if None, use EloParams default
-    elo_service: Optional[EloService] = None
+    elo_service: Optional[_EloSvcProto] = None
 
     # Base name
     name: ClassVar[ModelName] = ModelName.ELO
@@ -43,7 +58,7 @@ class EloModel(BasePredictiveModel):
         season = int(ctx.season)
         cfg = get_tier_config(league_id)
 
-        svc = self.elo_service or EloService()
+        svc: _EloSvcProto = self.elo_service or EloService()
 
         if ctx.home_team_id is None or ctx.away_team_id is None:
             return Prediction(
@@ -64,7 +79,9 @@ class EloModel(BasePredictiveModel):
             r_away = svc.get_team_rating(league_id, season, int(ctx.away_team_id))
 
         delta = r_home - r_away + float(cfg.home_adv)
-        nu = float(self.draw_param if self.draw_param is not None else EloParams().draw_param)
+        nu_in = float(self.draw_param if self.draw_param is not None else EloParams().draw_param)
+        # Clamp draw parameter to non-negative for stability
+        nu = max(0.0, nu_in)
         p_home, p_draw, p_away = _davidson_probs(delta, nu)
         probs = ProbabilityTriplet(home=p_home, draw=p_draw, away=p_away).normalized()
 
