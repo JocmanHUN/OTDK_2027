@@ -60,21 +60,20 @@ class EloModel(BasePredictiveModel):
 
         svc: _EloSvcProto = self.elo_service or EloService()
 
-        if ctx.home_team_id is None or ctx.away_team_id is None:
-            return Prediction(
-                fixture_id=match.fixture_id,
-                model=self.name,
-                probs=None,
-                computed_at_utc=datetime.now(timezone.utc),
-                version=self.version,
-                status=PredictionStatus.SKIPPED,
-                skip_reason="Missing team IDs in context",
-            )
-
-        # Use context ELOs if present; otherwise compute via service
+        # Use context ELOs if present; otherwise compute via service (requires team IDs)
         if ctx.elo_home is not None and ctx.elo_away is not None:
             r_home, r_away = float(ctx.elo_home), float(ctx.elo_away)
         else:
+            if ctx.home_team_id is None or ctx.away_team_id is None:
+                return Prediction(
+                    fixture_id=match.fixture_id,
+                    model=self.name,
+                    probs=None,
+                    computed_at_utc=datetime.now(timezone.utc),
+                    version=self.version,
+                    status=PredictionStatus.SKIPPED,
+                    skip_reason="Missing team IDs in context",
+                )
             r_home = svc.get_team_rating(league_id, season, int(ctx.home_team_id))
             r_away = svc.get_team_rating(league_id, season, int(ctx.away_team_id))
 
