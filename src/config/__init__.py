@@ -1,5 +1,8 @@
-"""Configuration package for API access settings."""
+"""Configuration package.
 
-from .settings import Settings, settings
+Note: Do not import and construct settings at package import time to keep
+test collection free from environment requirements. Import from
+``src.config.settings`` directly where needed.
+"""
 
-__all__ = ["Settings", "settings"]
+__all__: list[str] = []
