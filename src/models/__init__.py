@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import List
 
+from src.application.services.history_service import HistoryService
 from src.domain.interfaces.modeling import BasePredictiveModel
 
 from .balance import BalanceModel
@@ -17,11 +18,12 @@ def default_models() -> List[BasePredictiveModel]:
 
     Extend this list as new models are implemented (total target: 6).
     """
+    history = HistoryService()
     return [
         PoissonModel(),
         MonteCarloModel(),
         EloModel(),
         LogisticRegressionModel(),
-        BalanceModel(),
-        VetoModel(),
+        BalanceModel(history=history),
+        VetoModel(history=history),
     ]

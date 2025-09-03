@@ -9,6 +9,7 @@ from typing import Optional
 class League:
     id: int | None
     name: str
+    country: Optional[str] = None
 
 
 class LeaguesRepo(ABC):

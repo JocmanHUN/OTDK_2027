@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Optional
 
 
@@ -12,6 +13,7 @@ class Match:
     id: int | None
     league_id: int
     season: int
+    date: datetime
     home_team: str
     away_team: str
     real_result: str | None = None  # '1', 'X' or '2'

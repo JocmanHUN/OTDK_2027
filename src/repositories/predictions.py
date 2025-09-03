@@ -9,10 +9,13 @@ from typing import Optional
 class Prediction:
     id: int | None
     match_id: int
+    model_name: str
     prob_home: float
     prob_draw: float
     prob_away: float
+    predicted_result: str
     is_correct: bool | None = None
+    result_status: str = "PENDING"  # 'WIN', 'LOSE', or 'PENDING'
 
 
 class PredictionsRepo(ABC):

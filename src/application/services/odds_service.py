@@ -89,6 +89,23 @@ class OddsService:
     def get_cached_bookmaker_id(self, name: str) -> Optional[int]:
         return self._bookmaker_cache.get(name)
 
+    def get_fixture_bookmakers(self, fixture_id: int | FixtureId) -> dict[int, str]:
+        """Return a mapping of bookmaker_id -> bookmaker_name for the fixture.
+
+        Uses the same /odds payload but extracts identifiers and human names.
+        """
+        params = {"fixture": str(int(fixture_id))}
+        payload = self._client.get("odds", params)
+        items = _extract_response_list(payload)
+        out: dict[int, str] = {}
+        for item in items:
+            for bm in item.get("bookmakers", []) or []:
+                bm_id = _safe_int(bm.get("id"))
+                bm_name = bm.get("name")
+                if bm_id is not None and isinstance(bm_name, str) and bm_name:
+                    out[int(bm_id)] = bm_name
+        return out
+
 
 def _extract_response_list(payload: Any) -> list[Mapping[str, Any]]:
     if isinstance(payload, Mapping):

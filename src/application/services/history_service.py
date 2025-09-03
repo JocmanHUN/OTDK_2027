@@ -51,7 +51,12 @@ class HistoryService:
 
     # --------------------------- Head-to-head ---------------------------
     def get_head_to_head(
-        self, home_team_id: int, away_team_id: int, last: int = 20
+        self,
+        home_team_id: int,
+        away_team_id: int,
+        last: int = 20,
+        *,
+        exclude_friendlies: bool = True,
     ) -> list[dict[str, Any]]:
         params = {"h2h": f"{home_team_id}-{away_team_id}", "last": str(last)}
         payload = self._client.get("fixtures/headtohead", params)
@@ -59,6 +64,13 @@ class HistoryService:
 
         if isinstance(payload, Mapping):
             for item in payload.get("response", []) or []:
+                lg = item.get("league") or {}
+                lg_type = str(lg.get("type") or "").lower()
+                lg_name = str(lg.get("name") or "").lower()
+                if exclude_friendlies and (
+                    "friendly" in lg_name or lg_type == "friendly" or lg_type == "friendlies"
+                ):
+                    continue
                 fx = item.get("fixture") or {}
                 teams = item.get("teams") or {}
                 home = teams.get("home") or {}
@@ -82,6 +94,9 @@ class HistoryService:
                         "home_goals": _safe_int(goals.get("home")),
                         "away_goals": _safe_int(goals.get("away")),
                         "result": result,
+                        "league_id": _safe_int(lg.get("id")),
+                        "league_type": lg_type or None,
+                        "league_name": lg.get("name"),
                     }
                 )
         return rows
@@ -155,6 +170,7 @@ class HistoryService:
         last: int,
         *,
         only_finished: bool = True,
+        exclude_friendlies: bool = True,
     ) -> list[dict[str, Any]]:
         """Return the last N league fixtures for a team, backfilling previous seasons if needed.
 
@@ -182,6 +198,13 @@ class HistoryService:
                     if ts
                     else _to_utc(str(fx.get("date", "")))
                 )
+                lg = fx.get("league") or {}
+                lg_type = str((lg.get("type") or "")).lower()
+                lg_name = str((lg.get("name") or "")).lower()
+                if exclude_friendlies and (
+                    "friendly" in lg_name or lg_type in {"friendly", "friendlies"}
+                ):
+                    continue
                 teams = fx.get("teams") or {}
                 home = teams.get("home") or {}
                 away = teams.get("away") or {}
@@ -291,6 +314,7 @@ class HistoryService:
         if isinstance(payload, Mapping):
             for item in payload.get("response", []) or []:
                 fx = item.get("fixture") or {}
+                lg = item.get("league") or {}
                 status = (
                     (fx.get("status") or {}).get("short")
                     if isinstance(fx.get("status"), Mapping)
@@ -306,6 +330,7 @@ class HistoryService:
                         "id": _safe_int(fx.get("id")),
                         "timestamp": _safe_int(fx.get("timestamp")),
                         "date": fx.get("date"),
+                        "league": lg,
                         "teams": teams,
                         "goals": goals,
                         "status": status,

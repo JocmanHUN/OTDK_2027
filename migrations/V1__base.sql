@@ -1,6 +1,3 @@
-+50
--0
-
 -- Base schema migration
 
 PRAGMA foreign_keys = ON;
@@ -47,6 +44,11 @@ CREATE TABLE predictions (
     prob_away        REAL NOT NULL CHECK(prob_away BETWEEN 0 AND 1),
     predicted_result TEXT NOT NULL CHECK(predicted_result IN ('1','X','2')),
     is_correct       BOOLEAN CHECK(is_correct IN (0,1)),
+    result_status    TEXT NOT NULL DEFAULT 'PENDING' CHECK(result_status IN ('WIN','LOSE','PENDING')),
     FOREIGN KEY (match_id) REFERENCES matches(match_id),
     CHECK (prob_home + prob_draw + prob_away = 1)
 );
+
+-- Helpful indexes and uniqueness constraints
+CREATE UNIQUE INDEX IF NOT EXISTS ux_odds_match_bookmaker ON odds(match_id, bookmaker_id);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_predictions_match_model ON predictions(match_id, model_name);
