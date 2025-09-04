@@ -1,10 +1,11 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 import sqlite3
 import tkinter as tk
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from functools import partial
 from pathlib import Path
 from tkinter import messagebox, ttk
 from typing import Any, Dict, Iterable, List, Mapping, Tuple
@@ -299,6 +300,13 @@ MODEL_HEADERS = {
 class AppState:
     conn: sqlite3.Connection
     tree: ttk.Treeview
+    selected_bookmaker_id: int | None = None
+    bm_names_by_id: Dict[int, str] | None = None
+    bm_combo_var: tk.StringVar | None = None
+    bm_combo: ttk.Combobox | None = None
+    search_var: tk.StringVar | None = None
+    sort_by: int | None = None
+    sort_reverse: bool = False
 
 
 def _best_label_and_pct(
@@ -319,7 +327,36 @@ def refresh_table(state: AppState) -> None:
 
     matches, preds_by_match = _read_tomorrow_from_db(state.conn)
 
+    # Apply bookmaker filter: None -> only matches with any odds; otherwise only those with a row for selected bookmaker
+    def _has_any_odds(mid: int) -> bool:
+        cur = state.conn.execute("SELECT 1 FROM odds WHERE match_id = ? LIMIT 1", (mid,))
+        return cur.fetchone() is not None
+
+    def _has_bookmaker(mid: int, bid: int) -> bool:
+        cur = state.conn.execute(
+            "SELECT 1 FROM odds WHERE match_id = ? AND bookmaker_id = ? LIMIT 1", (mid, bid)
+        )
+        return cur.fetchone() is not None
+
+    # Apply free-text team filter if provided
+    q = (state.search_var.get() if state.search_var is not None else "").strip().lower()
+
+    filtered: list[Tuple[Any, ...]] = []
     for mid, dt_s, home, away in matches:
+        # Text filter on "home - away"
+        if q:
+            label = f"{home} - {away}".lower()
+            if q not in label:
+                continue
+        if state.selected_bookmaker_id is None:
+            if not _has_any_odds(int(mid)):
+                continue
+        else:
+            if not _has_bookmaker(int(mid), int(state.selected_bookmaker_id)):
+                continue
+        filtered.append((mid, dt_s, home, away))
+
+    for mid, dt_s, home, away in filtered:
         try:
             dt = datetime.fromisoformat(dt_s)
             if dt.tzinfo is None:
@@ -335,6 +372,20 @@ def refresh_table(state: AppState) -> None:
 
         model_map = preds_by_match.get(int(mid), {})
         values = [disp_dt, f"{home} - {away}"]
+        # If a bookmaker is selected, pull odds once per match to render beneath the probabilities
+        match_odds: Tuple[float, float, float] | None = None
+        if state.selected_bookmaker_id is not None:
+            try:
+                cur = state.conn.execute(
+                    "SELECT odds_home, odds_draw, odds_away FROM odds WHERE match_id = ? AND bookmaker_id = ? LIMIT 1",
+                    (int(mid), int(state.selected_bookmaker_id)),
+                )
+                r = cur.fetchone()
+                if r is not None:
+                    match_odds = (float(r[0]), float(r[1]), float(r[2]))
+            except Exception:
+                match_odds = None
+
         for key in MODEL_HEADERS.keys():
             trip = model_map.get(key)
             if trip:
@@ -343,8 +394,16 @@ def refresh_table(state: AppState) -> None:
                 values.append(f"{lbl} ({pct:.0f}%)")
             else:
                 values.append("-")
+        # Append odds columns at the end if selected; otherwise leave empty cells
+        if match_odds is not None and state.selected_bookmaker_id is not None:
+            oh, od, oa = match_odds
+            values.extend([f"{oh:.2f}", f"{od:.2f}", f"{oa:.2f}"])
+        else:
+            values.extend(["", "", ""])
         # use match_id as iid for easy retrieval on double-click
-        state.tree.insert("", "end", iid=str(int(mid)), values=values)
+        # Zebra striping for readability
+        tag = "odd" if (len(state.tree.get_children()) % 2 == 1) else "even"
+        state.tree.insert("", "end", iid=str(int(mid)), values=values, tags=(tag,))
 
 
 def _show_odds_window(tree: ttk.Treeview, fixture_id: int) -> None:
@@ -353,11 +412,11 @@ def _show_odds_window(tree: ttk.Treeview, fixture_id: int) -> None:
         odds_list = svc.get_fixture_odds(fixture_id)
         names = svc.get_fixture_bookmakers(fixture_id)
     except Exception as exc:
-        messagebox.showerror("Hiba", f"Odds lekérés sikertelen: {exc}")
+        messagebox.showerror("Hiba", f"Odds lekĂ©rĂ©s sikertelen: {exc}")
         return
 
     top = tk.Toplevel(tree.winfo_toplevel())
-    top.title(f"Odds – {fixture_id}")
+    top.title(f"Odds â€“ {fixture_id}")
     top.geometry("600x400")
     cols = ["Bookmaker", "Home", "Draw", "Away"]
     tv = ttk.Treeview(top, columns=cols, show="headings")
@@ -402,11 +461,11 @@ def _show_odds_window_db(conn: sqlite3.Connection, tree: ttk.Treeview, fixture_i
                 b = brepo.get_by_id(bid)
                 names[bid] = b.name if b else str(bid)
     except Exception as exc:
-        messagebox.showerror("Hiba", f"Odds betöltése az adatbázisból sikertelen: {exc}")
+        messagebox.showerror("Hiba", f"Odds betĂ¶ltĂ©se az adatbĂˇzisbĂłl sikertelen: {exc}")
         return
 
     top = tk.Toplevel(tree.winfo_toplevel())
-    top.title(f"Odds – {fixture_id}")
+    top.title(f"Odds â€“ {fixture_id}")
     top.geometry("600x400")
     cols = ["Bookmaker", "Home", "Draw", "Away"]
     tv = ttk.Treeview(top, columns=cols, show="headings")
@@ -468,18 +527,66 @@ def _default_model_names() -> List[str]:
 def run_app() -> None:
     # Build GUI first so errors can be shown reliably
     root = tk.Tk()
-    root.title("Holnapi meccsek és predikciók")
+    root.title("Holnapi meccsek Ă©s predikciĂłk")
     root.geometry("1200x600")
 
-    status_var = tk.StringVar(value="Adatok betöltése...")
+    status_var = tk.StringVar(value="Adatok betĂ¶ltĂ©se...")
     status_lbl = ttk.Label(root, textvariable=status_var)
     status_lbl.grid(row=3, column=0, sticky="w", padx=6, pady=4)
 
-    columns = ["Dátum", "Meccs"] + list(MODEL_HEADERS.values())
-    tree = ttk.Treeview(root, columns=columns, show="headings")
-    for col in columns:
-        tree.heading(col, text=col)
-        tree.column(col, width=130 if col != "Meccs" else 260, anchor=tk.W)
+    # columns defined via columns_base below
+    # Build columns with optional odds columns at the end; hide them by default via displaycolumns
+    columns_base = ["DĂˇtum", "Meccs"] + list(MODEL_HEADERS.values())
+    columns_all = columns_base + ["H odds", "D odds", "V odds"]
+    tree = ttk.Treeview(root, columns=columns_all, show="headings")
+
+    # Enable click-to-sort on headers
+    sort_by: int | None = None
+    sort_reverse: bool = False
+
+    def _on_sort(col_index: int) -> None:
+        nonlocal sort_by, sort_reverse
+        try:
+            # Toggle sort order when same column clicked
+            if sort_by == col_index:
+                sort_reverse = not sort_reverse
+            else:
+                sort_by = col_index
+                sort_reverse = False
+            # Extract current values and sort
+            items = tree.get_children("")
+
+            def _key(i: str) -> Any:
+                val = tree.set(i, columns_all[col_index])
+                try:
+                    return float(val)
+                except Exception:
+                    return str(val)
+
+            sorted_items = sorted(items, key=_key, reverse=sort_reverse)
+            for idx, iid in enumerate(sorted_items):
+                tree.move(iid, "", idx)
+        except Exception:
+            pass
+
+    for idx, col in enumerate(columns_all):
+        tree.heading(col, text=col, command=partial(_on_sort, idx))
+        # Compact widths to avoid horizontal scrolling when odds columns are shown
+        if col == "Meccs":
+            width = 200
+        elif col in ("Dátum", "D��tum"):
+            width = 120
+        elif col in ("H odds", "D odds", "V odds"):
+            width = 80
+        else:
+            width = 100
+        tree.column(col, width=width)
+        tree.column(col, anchor=("w" if col in ("Dátum", "D��tum", "Meccs") else "center"))
+        tree.column(col, stretch=False)
+    try:
+        tree.configure(displaycolumns=columns_base)
+    except Exception:
+        pass
 
     vsb = ttk.Scrollbar(root, orient="vertical", command=tree.yview)
     hsb = ttk.Scrollbar(root, orient="horizontal", command=tree.xview)
@@ -502,7 +609,82 @@ def run_app() -> None:
     except Exception:
         pass
     state = AppState(conn=tmp_conn, tree=tree)
-    ttk.Button(btn_frame, text="Frissítés", command=lambda: refresh_table(state)).pack(side=tk.LEFT)
+
+    # Bookmaker filter UI (combobox)
+    ttk.Label(btn_frame, text="FogadĂłiroda:").pack(side=tk.LEFT, padx=(0, 6))
+    bm_var = tk.StringVar(value="(Mind)")
+    bm_combo = ttk.Combobox(btn_frame, textvariable=bm_var, state="readonly", width=24)
+    bm_combo.pack(side=tk.LEFT, padx=(0, 12))
+    state.bm_combo_var = bm_var
+    state.bm_combo = bm_combo
+
+    # Free-text search for team names
+    ttk.Label(btn_frame, text="KeresĂ©s:").pack(side=tk.LEFT, padx=(0, 6))
+    search_var = tk.StringVar(value="")
+    entry = ttk.Entry(btn_frame, textvariable=search_var, width=24)
+    entry.pack(side=tk.LEFT, padx=(0, 12))
+    state.search_var = search_var
+
+    def _on_search_change(*_args: Any) -> None:
+        refresh_table(state)
+
+    search_var.trace_add("write", _on_search_change)
+
+    def _refresh_bm_list() -> None:
+        try:
+            cur = state.conn.execute("SELECT bookmaker_id, name FROM bookmakers ORDER BY name")
+            names_by_id: Dict[int, str] = {int(r[0]): str(r[1]) for r in cur.fetchall()}
+        except Exception:
+            names_by_id = {}
+        state.bm_names_by_id = names_by_id
+        values = ["(Mind)"] + [
+            names_by_id[k] for k in sorted(names_by_id, key=lambda x: names_by_id[x])
+        ]
+        bm_combo.configure(values=values)
+
+    def _update_odds_headers() -> None:
+        # Update odds column headers to show bookmaker name if selected
+        try:
+            if state.selected_bookmaker_id is not None and state.bm_names_by_id:
+                name = state.bm_names_by_id.get(int(state.selected_bookmaker_id), "")
+                tree.heading("H odds", text=f"H odds ({name})")
+                tree.heading("D odds", text=f"D odds ({name})")
+                tree.heading("V odds", text=f"V odds ({name})")
+            else:
+                tree.heading("H odds", text="H odds")
+                tree.heading("D odds", text="D odds")
+                tree.heading("V odds", text="V odds")
+        except Exception:
+            pass
+
+    def _on_bm_selected(event: object) -> None:
+        try:
+            sel = bm_var.get()
+            if sel == "(Mind)":
+                state.selected_bookmaker_id = None
+                try:
+                    tree.configure(displaycolumns=columns_base)
+                except Exception:
+                    pass
+            else:
+                if state.bm_names_by_id:
+                    # reverse map name->id
+                    rev = {v: k for k, v in state.bm_names_by_id.items()}
+                    state.selected_bookmaker_id = rev.get(sel)
+                try:
+                    tree.configure(displaycolumns=columns_all)
+                except Exception:
+                    pass
+            _update_odds_headers()
+            refresh_table(state)
+        except Exception:
+            pass
+
+    bm_combo.bind("<<ComboboxSelected>>", _on_bm_selected)
+
+    ttk.Button(btn_frame, text="FrissĂ­tĂ©s", command=lambda: refresh_table(state)).pack(
+        side=tk.LEFT
+    )
 
     # Double-click to show odds for the selected match from DB
     def _on_double_click(event: object) -> None:
@@ -552,20 +734,30 @@ def run_app() -> None:
         # Switch to read-only connection for the GUI
         ro = _open_ro()
         state.conn = ro
-        status_var.set("Kész.")
-    except Exception as exc:
-        print(f"[GUI] Hiba a feldolgozás során: {exc}")
+        # After switching to DB, populate bookmaker list
         try:
-            messagebox.showerror("Hiba", f"Hiba a feldolgozás során: {exc}")
+            _refresh_bm_list()
+        except Exception:
+            pass
+        _update_odds_headers()
+        status_var.set("KĂ©sz.")
+    except Exception as exc:
+        print(f"[GUI] Hiba a feldolgozĂˇs sorĂˇn: {exc}")
+        try:
+            messagebox.showerror("Hiba", f"Hiba a feldolgozĂˇs sorĂˇn: {exc}")
         except Exception:
             pass
         # If DB exists, try opening read-only to show existing rows
         try:
             if os.path.exists(DB_PATH):
                 state.conn = _open_ro()
+                try:
+                    _refresh_bm_list()
+                except Exception:
+                    pass
         except Exception:
             pass
-        status_var.set("Hiba történt.")
+        status_var.set("Hiba tĂ¶rtĂ©nt.")
 
     refresh_table(state)
     root.mainloop()
