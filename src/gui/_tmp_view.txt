@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from functools import partial
 from pathlib import Path
 from tkinter import messagebox, ttk
-from typing import Any, Dict, Iterable, List, Mapping, Tuple, cast
+from typing import Any, Dict, Iterable, List, Mapping, Tuple
 
 from src.application.services.fixtures_service import FixturesService
 from src.application.services.history_service import HistoryService
@@ -36,53 +36,6 @@ from src.repositories.sqlite.predictions_sqlite import PredictionsRepoSqlite
 BASE_DIR = Path(__file__).resolve().parents[2]
 DB_PATH = str(BASE_DIR / "data" / "app.db")
 MIGRATION_FILE = str(BASE_DIR / "migrations" / "V1__base.sql")
-
-
-# ---------------------------- UI helpers ----------------------------
-_MOJIBAKE_MAP: Dict[str, str] = {
-    "Holnapi meccsek �s predikci�k": "Holnapi meccsek és predikciók",
-    "Holnapi meccsek �cs predikciƈk": "Holnapi meccsek és predikciók",
-    "Adatok bet�\u0014lt�cse...": "Adatok betöltése...",
-    "Fogadƈiroda:": "Fogadóiroda:",
-    "Keres�cs:": "Keresés:",
-    "Friss��t�cs": "Frissítés",
-    "D��tum": "Dátum",
-    "D�tum": "Dátum",
-    "D??tum": "Dátum",
-    "K�csz.": "Kész.",
-    "Hiba t�\u0014rt�cnt.": "Hiba történt.",
-}
-
-
-def _fix_mojibake(s: str) -> str:
-    try:
-        out = s
-        for bad, good in _MOJIBAKE_MAP.items():
-            if bad in out:
-                out = out.replace(bad, good)
-        return out
-    except Exception:
-        return s
-
-
-def _normalize_widget_texts(container: tk.Misc) -> None:
-    try:
-        for w in container.winfo_children():
-            try:
-                txt = cast(Any, w).cget("text")
-            except Exception:
-                txt = None
-            if isinstance(txt, str):
-                new_txt = _fix_mojibake(txt)
-                if new_txt != txt:
-                    try:
-                        cast(Any, w).configure(text=new_txt)
-                    except Exception:
-                        pass
-            # Recurse into frames and other containers
-            _normalize_widget_texts(w)
-    except Exception:
-        pass
 
 
 def _ensure_db() -> sqlite3.Connection:
@@ -473,10 +426,6 @@ def _show_odds_window(tree: ttk.Treeview, fixture_id: int) -> None:
     top = tk.Toplevel(tree.winfo_toplevel())
     top.title(f"Odds â€“ {fixture_id}")
     top.geometry("600x400")
-    try:
-        top.title(f"Odds - {fixture_id}")
-    except Exception:
-        pass
     cols = ["Bookmaker", "Home", "Draw", "Away"]
     tv = ttk.Treeview(top, columns=cols, show="headings")
     for c in cols:
@@ -526,10 +475,6 @@ def _show_odds_window_db(conn: sqlite3.Connection, tree: ttk.Treeview, fixture_i
     top = tk.Toplevel(tree.winfo_toplevel())
     top.title(f"Odds â€“ {fixture_id}")
     top.geometry("600x400")
-    try:
-        top.title(f"Odds - {fixture_id}")
-    except Exception:
-        pass
     cols = ["Bookmaker", "Home", "Draw", "Away"]
     tv = ttk.Treeview(top, columns=cols, show="headings")
     for c in cols:
@@ -592,20 +537,10 @@ def run_app() -> None:
     root = tk.Tk()
     root.title("Holnapi meccsek Ă©s predikciĂłk")
     root.geometry("1200x600")
-    # Ensure proper accented title regardless of source encoding
-    try:
-        root.title("Holnapi meccsek és predikciók")
-    except Exception:
-        pass
 
     status_var = tk.StringVar(value="Adatok betĂ¶ltĂ©se...")
     status_lbl = ttk.Label(root, textvariable=status_var)
     status_lbl.grid(row=3, column=0, sticky="w", padx=6, pady=4)
-    # Normalize initial status text to proper UTF-8
-    try:
-        status_var.set("Adatok betöltése...")
-    except Exception:
-        pass
 
     # columns defined via columns_base below
     # Build columns with optional odds columns at the end; hide them by default via displaycolumns
@@ -656,11 +591,6 @@ def run_app() -> None:
         tree.column(col, width=width)
         tree.column(col, anchor=("w" if col in ("Dátum", "D��tum", "Meccs") else "center"))
         tree.column(col, stretch=False)
-    # Fix first column header label to show proper accented text
-    try:
-        tree.heading(columns_all[0], text="Dátum")
-    except Exception:
-        pass
     try:
         tree.configure(displaycolumns=columns_base)
     except Exception:
@@ -678,12 +608,6 @@ def run_app() -> None:
     # Controls
     btn_frame = ttk.Frame(root)
     btn_frame.grid(row=2, column=0, pady=8, sticky="w")
-
-    # Normalize any incorrectly encoded texts on labels/buttons (best-effort)
-    try:
-        _normalize_widget_texts(btn_frame)
-    except Exception:
-        pass
 
     # Default empty state until pipeline finishes: provision in-memory schema for safe refresh
     tmp_conn = sqlite3.connect(":memory:")
@@ -810,11 +734,9 @@ def run_app() -> None:
 
     model_combo.bind("<<ComboboxSelected>>", _on_model_selected)
 
-    ttk.Button(
-        btn_frame,
-        text="Friss\u00EDt\u00E9s",
-        command=lambda: refresh_table(state),
-    ).pack(side=tk.LEFT)
+    ttk.Button(btn_frame, text="FrissĂ­tĂ©s", command=lambda: refresh_table(state)).pack(
+        side=tk.LEFT
+    )
 
     # Double-click to show odds for the selected match from DB
     def _on_double_click(event: object) -> None:
@@ -869,13 +791,7 @@ def run_app() -> None:
             _refresh_bm_list()
         except Exception:
             pass
-        _refresh_model_list()
-        _apply_displaycolumns()
         _update_odds_headers()
-        try:
-            status_var.set("Kész.")
-        except Exception:
-            pass
         status_var.set("KĂ©sz.")
     except Exception as exc:
         print(f"[GUI] Hiba a feldolgozĂˇs sorĂˇn: {exc}")
@@ -889,11 +805,6 @@ def run_app() -> None:
                 state.conn = _open_ro()
                 try:
                     _refresh_bm_list()
-                except Exception:
-                    pass
-                try:
-                    _refresh_model_list()
-                    _apply_displaycolumns()
                 except Exception:
                     pass
         except Exception:
