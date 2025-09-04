@@ -1,1 +1,4 @@
-show file
+﻿er
+    ZoneInfo = None  # type: ignore[assignment]
+
+from src.application.services.fixtures_service import FixturesServic
