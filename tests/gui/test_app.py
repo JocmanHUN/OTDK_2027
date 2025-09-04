@@ -114,6 +114,8 @@ def test_predict_and_store_idempotent(monkeypatch: pytest.MonkeyPatch, tmp_db: A
                     away_team_id=TeamId(int(kwargs["away_team_id"])),
                     home_goal_rate=1.2,
                     away_goal_rate=0.8,
+                    elo_home=1500.0,
+                    elo_away=1500.0,
                 )
 
         monkeypatch.setattr(app, "ContextBuilder", FakeCtxBuilder)
