@@ -40,15 +40,15 @@ MIGRATION_FILE = str(BASE_DIR / "migrations" / "V1__base.sql")
 
 # ---------------------------- UI helpers ----------------------------
 _MOJIBAKE_MAP: Dict[str, str] = {
-    "Holnapi meccsek ?s predikci?k": "Holnapi meccsek \u00E9s predikci\u00F3k",
-    "Holnapi meccsek ?cs predikci?k": "Holnapi meccsek \u00E9s predikci\u00F3k",
-    "Adatok bet?\u0014lt?cse...": "Adatok bet\u00F6lt\u00E9se...",
-    "Fogad?iroda:": "Fogad\u00F3iroda:",
-    "Keres?cs:": "Keres\u00E9s:",
-    "Friss??t?cs": "Friss\u00EDt\u00E9s",
-    "D?tum": "D\u00E1tum",
-    "K?csz.": "K\u00E9sz.",
-    "Hiba t?\u0014rt?cnt.": "Hiba t\u00F6rt\u00E9nt.",
+    "Holnapi meccsek ?s predikci?k": "Holnapi meccsek \u00e9s predikci\u00f3k",
+    "Holnapi meccsek ?cs predikci?k": "Holnapi meccsek \u00e9s predikci\u00f3k",
+    "Adatok bet?\u0014lt?cse...": "Adatok bet\u00f6lt\u00e9se...",
+    "Fogad?iroda:": "Fogad\u00f3iroda:",
+    "Keres?cs:": "Keres\u00e9s:",
+    "Friss??t?cs": "Friss\u00edt\u00e9s",
+    "D?tum": "D\u00e1tum",
+    "K?csz.": "K\u00e9sz.",
+    "Hiba t?\u0014rt?cnt.": "Hiba t\u00f6rt\u00e9nt.",
 }
 
 
@@ -59,7 +59,7 @@ def _fix_mojibake(s: str) -> str:
             if bad in out:
                 out = out.replace(bad, good)
         # Heuristic re-decode for common mojibake (cp1252/latin-1 seen as UTF-8)
-        accented = "\u00E1\u00E9\u00ED\u00F3\u00F6\u0151\u00FA\u00FC\u0171\u00C1\u00C9\u00CD\u00D3\u00D6\u0150\u00DA\u00DC\u0170"
+        accented = "\u00e1\u00e9\u00ed\u00f3\u00f6\u0151\u00fa\u00fc\u0171\u00c1\u00c9\u00cd\u00d3\u00d6\u0150\u00da\u00dc\u0170"
         if "�" in out or any(ch in out for ch in ("Ã", "Â", "��")):
             for enc in ("cp1252", "latin-1"):
                 try:
@@ -341,6 +341,106 @@ def _read_tomorrow_from_db(
     return matches, preds_by_match
 
 
+def _read_played_from_db(
+    conn: sqlite3.Connection, *, days: int = 7
+) -> Tuple[List[Tuple], Dict[int, Dict[str, Tuple[float, float, float, str | None]]]]:
+    """Return matches already played within the last `days` days with predictions.
+
+    Selects matches with date < now (UTC), bounded to a sliding window.
+    """
+    cur = conn.cursor()
+    now_utc = datetime.now(timezone.utc)
+    start_utc = now_utc - timedelta(days=int(days))
+    cur.execute(
+        """
+        SELECT match_id, date, home_team, away_team
+        FROM matches
+        WHERE date < ? AND date >= ?
+        ORDER BY date DESC
+        """,
+        (now_utc.isoformat(), start_utc.isoformat()),
+    )
+    matches = cur.fetchall()
+
+    preds_by_match: Dict[int, Dict[str, Tuple[float, float, float, str | None]]] = {}
+    for mid, _dt, _h, _a in matches:
+        cur.execute(
+            """
+            SELECT model_name, prob_home, prob_draw, prob_away, predicted_result
+            FROM predictions
+            WHERE match_id = ?
+            """,
+            (mid,),
+        )
+        rows = cur.fetchall()
+        preds_by_match[int(mid)] = {
+            str(model): (float(ph), float(pd), float(pa), (pred if isinstance(pred, str) else None))
+            for (model, ph, pd, pa, pred) in rows
+        }
+
+    return matches, preds_by_match
+
+
+def _update_missing_results(conn: sqlite3.Connection) -> None:
+    """Fetch and persist real results for past matches missing `real_result`.
+
+    For each match with date < now and NULL real_result, query API for result
+    and persist '1'/'X'/'2' when available.
+    """
+    try:
+        # Use a separate write connection to avoid read-only GUI connection
+        try:
+            wconn = _ensure_db()
+        except Exception:
+            wconn = conn
+        cur = wconn.execute(
+            "SELECT match_id FROM matches WHERE real_result IS NULL AND date < ?",
+            (datetime.now(timezone.utc).isoformat(),),
+        )
+        rows = cur.fetchall()
+        if not rows:
+            return
+        history = HistoryService()
+        mrepo = MatchesRepoSqlite(wconn)
+        for (mid,) in rows:
+            try:
+                label = history.get_fixture_result_label(int(mid))
+                if label in {"1", "X", "2"}:
+                    mrepo.update_result(int(mid), str(label))
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+
+def _reconcile_prediction_statuses(conn: sqlite3.Connection) -> None:
+    """Mark predictions WIN/LOSE where `matches.real_result` is known.
+
+    This is a pure DB-side reconciliation: no network calls.
+    """
+    try:
+        conn.execute(
+            """
+            UPDATE predictions
+            SET
+                is_correct = CASE
+                    WHEN predicted_result = (
+                        SELECT real_result FROM matches m WHERE m.match_id = predictions.match_id
+                    ) THEN 1 ELSE 0 END,
+                result_status = CASE
+                    WHEN predicted_result = (
+                        SELECT real_result FROM matches m WHERE m.match_id = predictions.match_id
+                    ) THEN 'WIN' ELSE 'LOSE' END
+            WHERE match_id IN (
+                SELECT match_id FROM matches WHERE real_result IN ('1','X','2')
+            )
+            """
+        )
+        conn.commit()
+    except Exception:
+        pass
+
+
 # ---------------------------- GUI ----------------------------
 
 MODEL_HEADERS = {
@@ -367,6 +467,11 @@ class AppState:
     search_var: tk.StringVar | None = None
     sort_by: int | None = None
     sort_reverse: bool = False
+    # View state
+    show_played: bool = False
+    winners_only: bool = False
+    winners_only_var: tk.BooleanVar | None = None
+    winners_only_chk: ttk.Checkbutton | None = None
 
 
 def _best_label_and_pct(
@@ -385,7 +490,16 @@ def refresh_table(state: AppState) -> None:
     for i in state.tree.get_children():
         state.tree.delete(i)
 
-    matches, preds_by_match = _read_tomorrow_from_db(state.conn)
+    # Update missing results and reconcile statuses before loading rows
+    try:
+        _update_missing_results(state.conn)
+        _reconcile_prediction_statuses(state.conn)
+    except Exception:
+        pass
+    if getattr(state, "show_played", False):
+        matches, preds_by_match = _read_played_from_db(state.conn, days=7)
+    else:
+        matches, preds_by_match = _read_tomorrow_from_db(state.conn)
 
     # Apply bookmaker filter: None -> only matches with any odds; otherwise only those with a row for selected bookmaker
     def _has_any_odds(mid: int) -> bool:
@@ -436,7 +550,41 @@ def refresh_table(state: AppState) -> None:
             disp_dt = str(dt_s)
 
         model_map = preds_by_match.get(int(mid), {})
-        values = [disp_dt, f"{home} - {away}"]
+        # Fetch real result for display (1/X/2) if available
+        result_str = ""
+        try:
+            cur_res = state.conn.execute(
+                "SELECT real_result FROM matches WHERE match_id = ?",
+                (int(mid),),
+            )
+            rres = cur_res.fetchone()
+            if rres is not None and isinstance(rres[0], str):
+                result_str = str(rres[0])
+        except Exception:
+            result_str = ""
+        # Winners-only filter: only in played view with a selected model
+        try:
+            if (
+                getattr(state, "show_played", False)
+                and getattr(state, "winners_only", False)
+                and state.selected_model_key is not None
+            ):
+                if result_str not in {"1", "X", "2"}:
+                    continue
+                trip_sel_f = model_map.get(state.selected_model_key)
+                if not trip_sel_f:
+                    continue
+                phf, pdf, paf, preff = trip_sel_f
+                if isinstance(preff, str) and preff in {"1", "X", "2"}:
+                    sel_lbl_f = preff
+                else:
+                    vals_f = [("1", float(phf)), ("X", float(pdf)), ("2", float(paf))]
+                    sel_lbl_f, _ = max(vals_f, key=lambda x: x[1])
+                if sel_lbl_f != result_str:
+                    continue
+        except Exception:
+            pass
+        values = [disp_dt, f"{home} - {away}", result_str]
         # If a bookmaker is selected, pull odds once per match to render beneath the probabilities
         match_odds: Tuple[float, float, float] | None = None
         if state.selected_bookmaker_id is not None:
@@ -534,7 +682,26 @@ def refresh_table(state: AppState) -> None:
         # use match_id as iid for easy retrieval on double-click
         # Zebra striping for readability
         tag = "odd" if (len(state.tree.get_children()) % 2 == 1) else "even"
-        state.tree.insert("", "end", iid=str(int(mid)), values=values, tags=(tag,))
+        # Row coloring for played matches when a single model is selected
+        row_tags = [tag]
+        try:
+            if getattr(state, "show_played", False) and state.selected_model_key is not None:
+                if result_str in {"1", "X", "2"}:
+                    trip_sel2 = model_map.get(state.selected_model_key)
+                    if trip_sel2:
+                        ph2, pd2, pa2, pref2 = trip_sel2
+                        if isinstance(pref2, str) and pref2 in {"1", "X", "2"}:
+                            sel_lbl2 = pref2
+                        else:
+                            vals2 = [("1", float(ph2)), ("X", float(pd2)), ("2", float(pa2))]
+                            sel_lbl2, _ = max(vals2, key=lambda x: x[1])
+                        if sel_lbl2 == result_str:
+                            row_tags.append("row_win")
+                        else:
+                            row_tags.append("row_lose")
+        except Exception:
+            pass
+        state.tree.insert("", "end", iid=str(int(mid)), values=values, tags=tuple(row_tags))
 
 
 def _show_odds_window(tree: ttk.Treeview, fixture_id: int) -> None:
@@ -543,7 +710,7 @@ def _show_odds_window(tree: ttk.Treeview, fixture_id: int) -> None:
         odds_list = svc.get_fixture_odds(fixture_id)
         names = svc.get_fixture_bookmakers(fixture_id)
     except Exception as exc:
-        messagebox.showerror("Hiba", f"Odds lek\u00E9r\u00E9se sikertelen: {exc}")
+        messagebox.showerror("Hiba", f"Odds lek\u00e9r\u00e9se sikertelen: {exc}")
         return
 
     top = tk.Toplevel(tree.winfo_toplevel())
@@ -601,7 +768,7 @@ def _show_odds_window_db(conn: sqlite3.Connection, tree: ttk.Treeview, fixture_i
                 names[bid] = b.name if b else str(bid)
     except Exception as exc:
         messagebox.showerror(
-            "Hiba", f"Odds bet\u00F6lt\u00E9se az adatb\u00E1zisb\u00F3l sikertelen: {exc}"
+            "Hiba", f"Odds bet\u00f6lt\u00e9se az adatb\u00e1zisb\u00f3l sikertelen: {exc}"
         )
         return
 
@@ -676,26 +843,26 @@ def _default_model_names() -> List[str]:
 def run_app() -> None:
     # Build GUI first so errors can be shown reliably
     root = tk.Tk()
-    root.title("Holnapi meccsek \u00E9s predikci\u00F3k")
+    root.title("Holnapi meccsek \u00e9s predikci\u00f3k")
     root.geometry("1200x600")
     # Ensure proper accented title regardless of source encoding
     try:
-        root.title("Holnapi meccsek \u00E9s predikci\u00F3k")
+        root.title("Holnapi meccsek \u00e9s predikci\u00f3k")
     except Exception:
         pass
 
-    status_var = tk.StringVar(value="Adatok bet\u00F6lt\u00E9se...")
+    status_var = tk.StringVar(value="Adatok bet\u00f6lt\u00e9se...")
     status_lbl = ttk.Label(root, textvariable=status_var)
     status_lbl.grid(row=3, column=0, sticky="w", padx=6, pady=4)
     # Normalize initial status text to proper UTF-8
     try:
-        status_var.set("Adatok bet\u00F6lt\u00E9se...")
+        status_var.set("Adatok bet\u00f6lt\u00e9se...")
     except Exception:
         pass
 
     # columns defined via columns_base below
     # Build columns with optional odds columns at the end; hide them by default via displaycolumns
-    columns_base = ["D\u00E1tum", "Meccs"] + list(MODEL_HEADERS.values())
+    columns_base = ["D\u00e1tum", "Meccs", "Eredm\u00e9ny"] + list(MODEL_HEADERS.values())
     columns_all = columns_base + ["H odds", "D odds", "V odds"]
     tree = ttk.Treeview(root, columns=columns_all, show="headings")
     # Extend columns with odds-shopping column
@@ -780,7 +947,7 @@ def run_app() -> None:
         # Compact widths to avoid horizontal scrolling when odds columns are shown
         if col == "Meccs":
             width = 200
-        elif col in ("D\u00E1tum",):
+        elif col in ("D\u00e1tum",):
             width = 120
         elif col == EV_COL:
             width = 70
@@ -789,11 +956,11 @@ def run_app() -> None:
         else:
             width = 100
         tree.column(col, width=width)
-        tree.column(col, anchor=("w" if col in ("D\u00E1tum", "Meccs") else "center"))
+        tree.column(col, anchor=("w" if col in ("D\u00e1tum", "Meccs") else "center"))
         tree.column(col, stretch=False)
     # Fix first column header label to show proper accented text
     try:
-        tree.heading(columns_all[0], text="D\u00E1tum")
+        tree.heading(columns_all[0], text="D\u00e1tum")
     except Exception:
         pass
     try:
@@ -809,6 +976,13 @@ def run_app() -> None:
     hsb.grid(row=1, column=0, sticky="ew")
     root.grid_rowconfigure(0, weight=1)
     root.grid_columnconfigure(0, weight=1)
+
+    # Row coloring tags for correctness (applied only in played view)
+    try:
+        tree.tag_configure("row_win", background="#e6ffe6")  # light green
+        tree.tag_configure("row_lose", background="#ffeaea")  # light red
+    except Exception:
+        pass
 
     # Controls
     btn_frame = ttk.Frame(root)
@@ -831,7 +1005,7 @@ def run_app() -> None:
     state = AppState(conn=tmp_conn, tree=tree)
 
     # Bookmaker filter UI (combobox)
-    ttk.Label(btn_frame, text="Fogad\u00F3iroda:").pack(side=tk.LEFT, padx=(0, 6))
+    ttk.Label(btn_frame, text="Fogad\u00f3iroda:").pack(side=tk.LEFT, padx=(0, 6))
     bm_var = tk.StringVar(value="(Mind)")
     bm_combo = ttk.Combobox(btn_frame, textvariable=bm_var, state="readonly", width=24)
     bm_combo.pack(side=tk.LEFT, padx=(0, 12))
@@ -847,11 +1021,87 @@ def run_app() -> None:
     state.model_combo = model_combo
 
     # Free-text search for team names
-    ttk.Label(btn_frame, text="Keres\u00E9s:").pack(side=tk.LEFT, padx=(0, 6))
+    ttk.Label(btn_frame, text="Keres\u00e9s:").pack(side=tk.LEFT, padx=(0, 6))
     search_var = tk.StringVar(value="")
     entry = ttk.Entry(btn_frame, textvariable=search_var, width=24)
     entry.pack(side=tk.LEFT, padx=(0, 12))
     state.search_var = search_var
+
+    # Toggle button for played/upcoming view
+    state.show_played = False
+
+    def _update_played_btn_label() -> None:
+        try:
+            if state.show_played:
+                played_btn.configure(text="K\u00f6zelg\u0151 m\u00e9rk\u0151z\u00e9sek")
+            else:
+                played_btn.configure(text="Befejezett m\u00e9rk\u0151z\u00e9sek")
+        except Exception:
+            pass
+
+    def _on_toggle_played() -> None:
+        try:
+            state.show_played = not bool(getattr(state, "show_played", False))
+            _apply_displaycolumns()
+            _update_odds_headers()
+            try:
+                _update_winners_filter_visibility()
+            except Exception:
+                pass
+            _update_played_btn_label()
+            refresh_table(state)
+        except Exception:
+            pass
+
+    played_btn = ttk.Button(
+        btn_frame, text="Befejezett m\u00e9rk\u0151z\u00e9sek", command=_on_toggle_played
+    )
+    played_btn.pack(side=tk.LEFT, padx=(0, 12))
+    _update_played_btn_label()
+
+    # Winners-only checkbox (visible only for played view with a selected model)
+    winners_var = tk.BooleanVar(value=False)
+    state.winners_only = False  # dynamic attribute
+    state.winners_only_var = winners_var
+
+    def _on_winners_toggle() -> None:
+        try:
+            state.winners_only = bool(winners_var.get())
+            refresh_table(state)
+        except Exception:
+            pass
+
+    winners_chk = ttk.Checkbutton(
+        btn_frame,
+        text="Csak nyertes",
+        variable=winners_var,
+        command=_on_winners_toggle,
+    )
+    state.winners_only_chk = winners_chk
+
+    def _update_winners_filter_visibility() -> None:
+        try:
+            has_model = state.selected_model_key is not None
+            if getattr(state, "show_played", False) and has_model:
+                # Show if not already mapped
+                try:
+                    if not winners_chk.winfo_ismapped():
+                        winners_chk.pack(side=tk.LEFT, padx=(0, 12))
+                except Exception:
+                    winners_chk.pack(side=tk.LEFT, padx=(0, 12))
+            else:
+                # Hide and reset
+                try:
+                    winners_chk.pack_forget()
+                except Exception:
+                    pass
+                try:
+                    winners_var.set(False)
+                    state.winners_only = False
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def _on_search_change(*_args: Any) -> None:
         refresh_table(state)
@@ -904,7 +1154,11 @@ def run_app() -> None:
         try:
             date_col = columns_base[0]
             match_col = columns_base[1]
+            result_col = columns_base[2]
             display = [date_col, match_col]
+            # Show real result column only in played-matches view
+            if getattr(state, "show_played", False):
+                display.append(result_col)
             has_model = state.selected_model_key is not None
             has_bookmaker = state.selected_bookmaker_id is not None
             if not has_model:
@@ -964,6 +1218,10 @@ def run_app() -> None:
                 rev = {v: k for k, v in MODEL_HEADERS.items()}
                 state.selected_model_key = rev.get(sel)
             _apply_displaycolumns()
+            try:
+                _update_winners_filter_visibility()
+            except Exception:
+                pass
             refresh_table(state)
         except Exception:
             pass
@@ -972,7 +1230,7 @@ def run_app() -> None:
 
     ttk.Button(
         btn_frame,
-        text="Friss\u00EDt\u00E9s",
+        text="Friss\u00edt\u00e9s",
         command=lambda: refresh_table(state),
     ).pack(side=tk.LEFT)
 
@@ -1033,14 +1291,14 @@ def run_app() -> None:
         _apply_displaycolumns()
         _update_odds_headers()
         try:
-            status_var.set("K\u00E9sz.")
+            status_var.set("K\u00e9sz.")
         except Exception:
             pass
-        status_var.set("K\u00E9sz.")
+        status_var.set("K\u00e9sz.")
     except Exception as exc:
-        print(f"[GUI] Hiba a feldolgoz\u00E1s sor\u00E1n: {exc}")
+        print(f"[GUI] Hiba a feldolgoz\u00e1s sor\u00e1n: {exc}")
         try:
-            messagebox.showerror("Hiba", f"Hiba a feldolgoz\u00E1s sor\u00E1n: {exc}")
+            messagebox.showerror("Hiba", f"Hiba a feldolgoz\u00e1s sor\u00e1n: {exc}")
         except Exception:
             pass
         # If DB exists, try opening read-only to show existing rows
@@ -1058,7 +1316,7 @@ def run_app() -> None:
                     pass
         except Exception:
             pass
-        status_var.set("Hiba t\u00F6rt\u00E9nt.")
+        status_var.set("Hiba t\u00f6rt\u00e9nt.")
 
     refresh_table(state)
     root.mainloop()

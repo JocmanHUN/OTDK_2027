@@ -362,6 +362,77 @@ class HistoryService:
                 result[int(t_id)] = bucket
         return result
 
+    # --------------------------- Fixture result ---------------------------
+    def get_fixture_result_label(self, fixture_id: int) -> str | None:
+        """Return '1'/'X'/'2' for a fixture when a final result is inferable.
+
+        Accepts final statuses like 'FT' (full time), 'AET' (after extra time), 'PEN' (after penalties).
+        Falls back to team winner flags or score breakdown if goals are missing.
+        """
+        try:
+            payload = self._client.get("fixtures", {"id": str(int(fixture_id))})
+        except Exception:
+            return None
+        if not isinstance(payload, Mapping):
+            return None
+        resp = payload.get("response")
+        if not isinstance(resp, list) or not resp:
+            return None
+        item = resp[0]
+        fx = item.get("fixture") or {}
+        status = (
+            (fx.get("status") or {}).get("short") if isinstance(fx.get("status"), Mapping) else None
+        )
+        teams = item.get("teams") or {}
+        home_t = teams.get("home") or {}
+        away_t = teams.get("away") or {}
+        # If API already flags a winner team
+        try:
+            if home_t.get("winner") is True:
+                return "1"
+            if away_t.get("winner") is True:
+                return "2"
+        except Exception:
+            pass
+
+        # Accept a set of finished statuses
+        finished_statuses = {"FT", "AET", "PEN"}
+        if status not in finished_statuses:
+            return None
+
+        # Prefer top-level goals
+        goals = item.get("goals") or {}
+        gh = goals.get("home")
+        ga = goals.get("away")
+        try:
+            gh_i = int(gh) if gh is not None else None
+            ga_i = int(ga) if ga is not None else None
+        except Exception:
+            gh_i = ga_i = None
+
+        # If goals are missing, try score breakdown
+        if gh_i is None or ga_i is None:
+            score = item.get("score") or {}
+            for key in ("penalty", "extratime", "fulltime"):
+                seg = score.get(key) or {}
+                try:
+                    _h_tmp = _safe_int(seg.get("home"))
+                    _a_tmp = _safe_int(seg.get("away"))
+                    if _h_tmp is not None:
+                        gh_i = _h_tmp
+                    if _a_tmp is not None:
+                        ga_i = _a_tmp
+                except Exception:
+                    continue
+                if gh_i is not None and ga_i is not None:
+                    break
+
+        if gh_i is None or ga_i is None:
+            return None
+        if gh_i == ga_i:
+            return "X"
+        return "1" if gh_i > ga_i else "2"
+
     # --------------------------- Team main league for a season ---------------------------
     def get_team_main_league(self, team_id: int, season: int) -> int | None:
         """Infer the league where a team mostly played in a given season.
