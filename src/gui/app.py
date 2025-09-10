@@ -40,15 +40,15 @@ MIGRATION_FILE = str(BASE_DIR / "migrations" / "V1__base.sql")
 
 # ---------------------------- UI helpers ----------------------------
 _MOJIBAKE_MAP: Dict[str, str] = {
-    "Holnapi meccsek �s predikci�k": "Holnapi meccsek és predikciók",
-    "Holnapi meccsek �cs predikciƈk": "Holnapi meccsek és predikciók",
-    "Adatok bet�\u0014lt�cse...": "Adatok betöltése...",
-    "Fogadƈiroda:": "Fogadóiroda:",
-    "Keres�cs:": "Keresés:",
-    "Friss��t�cs": "Frissítés",
-    "D�tum": "Dátum",
-    "K�csz.": "Kész.",
-    "Hiba t�\u0014rt�cnt.": "Hiba történt.",
+    "Holnapi meccsek ?s predikci?k": "Holnapi meccsek \u00E9s predikci\u00F3k",
+    "Holnapi meccsek ?cs predikci?k": "Holnapi meccsek \u00E9s predikci\u00F3k",
+    "Adatok bet?\u0014lt?cse...": "Adatok bet\u00F6lt\u00E9se...",
+    "Fogad?iroda:": "Fogad\u00F3iroda:",
+    "Keres?cs:": "Keres\u00E9s:",
+    "Friss??t?cs": "Friss\u00EDt\u00E9s",
+    "D?tum": "D\u00E1tum",
+    "K?csz.": "K\u00E9sz.",
+    "Hiba t?\u0014rt?cnt.": "Hiba t\u00F6rt\u00E9nt.",
 }
 
 
@@ -58,6 +58,18 @@ def _fix_mojibake(s: str) -> str:
         for bad, good in _MOJIBAKE_MAP.items():
             if bad in out:
                 out = out.replace(bad, good)
+        # Heuristic re-decode for common mojibake (cp1252/latin-1 seen as UTF-8)
+        accented = "\u00E1\u00E9\u00ED\u00F3\u00F6\u0151\u00FA\u00FC\u0171\u00C1\u00C9\u00CD\u00D3\u00D6\u0150\u00DA\u00DC\u0170"
+        if "�" in out or any(ch in out for ch in ("Ã", "Â", "��")):
+            for enc in ("cp1252", "latin-1"):
+                try:
+                    cand = out.encode(enc, errors="ignore").decode("utf-8", errors="ignore")
+                    # Prefer candidate if it removes replacement chars or adds accented letters
+                    if ("�" in out and "�" not in cand) or any(ch in cand for ch in accented):
+                        out = cand
+                        break
+                except Exception:
+                    continue
         return out
     except Exception:
         return s
@@ -447,12 +459,78 @@ def refresh_table(state: AppState) -> None:
                 values.append(f"{lbl} ({pct:.0f}%)")
             else:
                 values.append("-")
-        # Append odds columns at the end if selected; otherwise leave empty cells
-        if match_odds is not None and state.selected_bookmaker_id is not None:
-            oh, od, oa = match_odds
-            values.extend([f"{oh:.2f}", f"{od:.2f}", f"{oa:.2f}"])
-        else:
-            values.extend(["", "", ""])
+        # Add odds shopping column when a single model is selected
+        ev_cell = ""
+        if state.selected_model_key is not None:
+            best_text = ""
+            try:
+                trip_sel = model_map.get(state.selected_model_key)
+                if trip_sel:
+                    ph, pd, pa, pref = trip_sel
+                    if isinstance(pref, str) and pref in {"1", "X", "2"}:
+                        sel_lbl = pref
+                    else:
+                        vals = [("1", ph), ("X", pd), ("2", pa)]
+                        sel_lbl, _ = max(vals, key=lambda x: x[1])
+                    # If both model and bookmaker are selected, show that bookmaker's odd for the tip
+                    if state.selected_bookmaker_id is not None and match_odds is not None:
+                        oh, od, oa = match_odds
+                        odd_val = oh if sel_lbl == "1" else (od if sel_lbl == "X" else oa)
+                        best_text = f"{odd_val:.2f}"
+                        # Compute expected value for selected bookmaker and model tip
+                        p = ph if sel_lbl == "1" else (pd if sel_lbl == "X" else pa)
+                        ev = p * (odd_val) - 1.0
+                        ev_cell = f"{ev*100:+.0f}%"
+                    else:
+                        # Otherwise compute and show best across bookmakers for the tip
+                        best: Dict[str, Tuple[int, float]] = {}
+                        cur2 = state.conn.execute(
+                            "SELECT bookmaker_id, odds_home, odds_draw, odds_away FROM odds WHERE match_id = ?",
+                            (int(mid),),
+                        )
+                        for bid_raw, oh, od, oa in cur2.fetchall():
+                            bid = int(bid_raw)
+                            ohf, odf, oaf = float(oh), float(od), float(oa)
+                            if ("1" not in best) or (ohf > best["1"][1]):
+                                best["1"] = (bid, ohf)
+                            if ("X" not in best) or (odf > best["X"][1]):
+                                best["X"] = (bid, odf)
+                            if ("2" not in best) or (oaf > best["2"][1]):
+                                best["2"] = (bid, oaf)
+                        if sel_lbl in best:
+                            bid, odd = best[sel_lbl]
+                            if state.bm_names_by_id:
+                                bm_name = state.bm_names_by_id.get(int(bid), str(bid))
+                            else:
+                                bm_name = str(bid)
+                            best_text = f"{bm_name} {odd:.2f}"
+                            # Compute BEST EV when no bookmaker selected
+                            p = ph if sel_lbl == "1" else (pd if sel_lbl == "X" else pa)
+                            ev = p * odd - 1.0
+                            ev_cell = f"{ev*100:+.0f}%"
+            except Exception:
+                best_text = ""
+            values.append(best_text)
+            # Append EV cell right after the tip-odds column
+            values.append(ev_cell)
+        # If BEST_ODDS_COL exists but no single model selected, pad empty cells to keep columns aligned
+        try:
+            if state.selected_model_key is None:
+                cols_tuple = cast(Tuple[str, ...], state.tree["columns"])
+                if any(c == "Best odds" for c in cols_tuple):
+                    values.append("")
+                # EV column placeholder
+                if any(c == "EV" for c in cols_tuple):
+                    values.append("")
+        except Exception:
+            pass
+        # Append detailed odds columns only when bookmaker is selected AND no specific model is selected
+        if state.selected_bookmaker_id is not None and state.selected_model_key is None:
+            if match_odds is not None:
+                oh, od, oa = match_odds
+                values.extend([f"{oh:.2f}", f"{od:.2f}", f"{oa:.2f}"])
+            else:
+                values.extend(["", "", ""])
         # use match_id as iid for easy retrieval on double-click
         # Zebra striping for readability
         tag = "odd" if (len(state.tree.get_children()) % 2 == 1) else "even"
@@ -465,11 +543,11 @@ def _show_odds_window(tree: ttk.Treeview, fixture_id: int) -> None:
         odds_list = svc.get_fixture_odds(fixture_id)
         names = svc.get_fixture_bookmakers(fixture_id)
     except Exception as exc:
-        messagebox.showerror("Hiba", f"Odds lekĂ©rĂ©s sikertelen: {exc}")
+        messagebox.showerror("Hiba", f"Odds lek\u00E9r\u00E9se sikertelen: {exc}")
         return
 
     top = tk.Toplevel(tree.winfo_toplevel())
-    top.title(f"Odds â€“ {fixture_id}")
+    top.title(f"Odds - {fixture_id}")
     top.geometry("600x400")
     try:
         top.title(f"Odds - {fixture_id}")
@@ -486,6 +564,10 @@ def _show_odds_window(tree: ttk.Treeview, fixture_id: int) -> None:
     vsb.grid(row=0, column=1, sticky="ns")
     top.grid_rowconfigure(0, weight=1)
     top.grid_columnconfigure(0, weight=1)
+    try:
+        _normalize_widget_texts(top)
+    except Exception:
+        pass
 
     # Populate
     for o in odds_list:
@@ -518,11 +600,13 @@ def _show_odds_window_db(conn: sqlite3.Connection, tree: ttk.Treeview, fixture_i
                 b = brepo.get_by_id(bid)
                 names[bid] = b.name if b else str(bid)
     except Exception as exc:
-        messagebox.showerror("Hiba", f"Odds betĂ¶ltĂ©se az adatbĂˇzisbĂłl sikertelen: {exc}")
+        messagebox.showerror(
+            "Hiba", f"Odds bet\u00F6lt\u00E9se az adatb\u00E1zisb\u00F3l sikertelen: {exc}"
+        )
         return
 
     top = tk.Toplevel(tree.winfo_toplevel())
-    top.title(f"Odds â€“ {fixture_id}")
+    top.title(f"Odds - {fixture_id}")
     top.geometry("600x400")
     try:
         top.title(f"Odds - {fixture_id}")
@@ -539,6 +623,10 @@ def _show_odds_window_db(conn: sqlite3.Connection, tree: ttk.Treeview, fixture_i
     vsb.grid(row=0, column=1, sticky="ns")
     top.grid_rowconfigure(0, weight=1)
     top.grid_columnconfigure(0, weight=1)
+    try:
+        _normalize_widget_texts(top)
+    except Exception:
+        pass
 
     for o in odds_list:
         bid = int(o.bookmaker_id)
@@ -588,28 +676,38 @@ def _default_model_names() -> List[str]:
 def run_app() -> None:
     # Build GUI first so errors can be shown reliably
     root = tk.Tk()
-    root.title("Holnapi meccsek Ă©s predikciĂłk")
+    root.title("Holnapi meccsek \u00E9s predikci\u00F3k")
     root.geometry("1200x600")
     # Ensure proper accented title regardless of source encoding
     try:
-        root.title("Holnapi meccsek és predikciók")
+        root.title("Holnapi meccsek \u00E9s predikci\u00F3k")
     except Exception:
         pass
 
-    status_var = tk.StringVar(value="Adatok betĂ¶ltĂ©se...")
+    status_var = tk.StringVar(value="Adatok bet\u00F6lt\u00E9se...")
     status_lbl = ttk.Label(root, textvariable=status_var)
     status_lbl.grid(row=3, column=0, sticky="w", padx=6, pady=4)
     # Normalize initial status text to proper UTF-8
     try:
-        status_var.set("Adatok betöltése...")
+        status_var.set("Adatok bet\u00F6lt\u00E9se...")
     except Exception:
         pass
 
     # columns defined via columns_base below
     # Build columns with optional odds columns at the end; hide them by default via displaycolumns
-    columns_base = ["DĂˇtum", "Meccs"] + list(MODEL_HEADERS.values())
+    columns_base = ["D\u00E1tum", "Meccs"] + list(MODEL_HEADERS.values())
     columns_all = columns_base + ["H odds", "D odds", "V odds"]
     tree = ttk.Treeview(root, columns=columns_all, show="headings")
+    # Extend columns with odds-shopping column
+    BEST_ODDS_COL = "Best odds"
+    EV_COL = "EV"
+    try:
+        if BEST_ODDS_COL not in columns_all:
+            columns_all = columns_base + [BEST_ODDS_COL, EV_COL, "H odds", "D odds", "V odds"]
+            tree.configure(columns=columns_all)
+    except Exception:
+        # Safe fallback if reconfiguration fails
+        pass
 
     # Enable click-to-sort on headers
     sort_by: int | None = None
@@ -632,7 +730,13 @@ def run_app() -> None:
                 try:
                     return float(val)
                 except Exception:
-                    return str(val)
+                    # Try to parse trailing numeric token (e.g., "bookmaker 2.22")
+                    try:
+                        s = str(val).strip()
+                        last = s.split()[-1]
+                        return float(last)
+                    except Exception:
+                        return str(val)
 
             sorted_items = sorted(items, key=_key, reverse=sort_reverse)
             for idx, iid in enumerate(sorted_items):
@@ -645,18 +749,20 @@ def run_app() -> None:
         # Compact widths to avoid horizontal scrolling when odds columns are shown
         if col == "Meccs":
             width = 200
-        elif col in ("Dátum", "D��tum"):
+        elif col in ("D\u00E1tum",):
             width = 120
+        elif col == EV_COL:
+            width = 70
         elif col in ("H odds", "D odds", "V odds"):
             width = 80
         else:
             width = 100
         tree.column(col, width=width)
-        tree.column(col, anchor=("w" if col in ("Dátum", "D��tum", "Meccs") else "center"))
+        tree.column(col, anchor=("w" if col in ("D\u00E1tum", "Meccs") else "center"))
         tree.column(col, stretch=False)
     # Fix first column header label to show proper accented text
     try:
-        tree.heading(columns_all[0], text="Dátum")
+        tree.heading(columns_all[0], text="D\u00E1tum")
     except Exception:
         pass
     try:
@@ -679,6 +785,7 @@ def run_app() -> None:
 
     # Normalize any incorrectly encoded texts on labels/buttons (best-effort)
     try:
+        _normalize_widget_texts(root)
         _normalize_widget_texts(btn_frame)
     except Exception:
         pass
@@ -693,7 +800,7 @@ def run_app() -> None:
     state = AppState(conn=tmp_conn, tree=tree)
 
     # Bookmaker filter UI (combobox)
-    ttk.Label(btn_frame, text="FogadĂłiroda:").pack(side=tk.LEFT, padx=(0, 6))
+    ttk.Label(btn_frame, text="Fogad\u00F3iroda:").pack(side=tk.LEFT, padx=(0, 6))
     bm_var = tk.StringVar(value="(Mind)")
     bm_combo = ttk.Combobox(btn_frame, textvariable=bm_var, state="readonly", width=24)
     bm_combo.pack(side=tk.LEFT, padx=(0, 12))
@@ -709,7 +816,7 @@ def run_app() -> None:
     state.model_combo = model_combo
 
     # Free-text search for team names
-    ttk.Label(btn_frame, text="KeresĂ©s:").pack(side=tk.LEFT, padx=(0, 6))
+    ttk.Label(btn_frame, text="Keres\u00E9s:").pack(side=tk.LEFT, padx=(0, 6))
     search_var = tk.StringVar(value="")
     entry = ttk.Entry(btn_frame, textvariable=search_var, width=24)
     entry.pack(side=tk.LEFT, padx=(0, 12))
@@ -740,10 +847,24 @@ def run_app() -> None:
                 tree.heading("H odds", text=f"H odds ({name})")
                 tree.heading("D odds", text=f"D odds ({name})")
                 tree.heading("V odds", text=f"V odds ({name})")
+                # If a single model is selected, show bookmaker name in the tip-odds column header
+                try:
+                    if state.selected_model_key is not None:
+                        tree.heading(BEST_ODDS_COL, text=name or "Tip odds")
+                        tree.heading(EV_COL, text="EV")
+                except Exception:
+                    pass
             else:
                 tree.heading("H odds", text="H odds")
                 tree.heading("D odds", text="D odds")
                 tree.heading("V odds", text="V odds")
+                try:
+                    if state.selected_model_key is not None:
+                        tree.heading(BEST_ODDS_COL, text="Best odds")
+                        # When no bookmaker is selected, show BEST EV header
+                        tree.heading(EV_COL, text="BEST EV")
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -753,15 +874,25 @@ def run_app() -> None:
             date_col = columns_base[0]
             match_col = columns_base[1]
             display = [date_col, match_col]
-            if state.selected_model_key is None:
+            has_model = state.selected_model_key is not None
+            has_bookmaker = state.selected_bookmaker_id is not None
+            if not has_model:
                 display += list(MODEL_HEADERS.values())
             else:
-                disp = MODEL_HEADERS.get(state.selected_model_key)
+                # mypy: selected_model_key is not None here, but not narrowed; cast to str
+                model_key = cast(str, state.selected_model_key)
+                disp = MODEL_HEADERS.get(model_key)
                 if disp:
                     display.append(disp)
                 else:
                     display += list(MODEL_HEADERS.values())
-            if state.selected_bookmaker_id is not None:
+                # When a single model is selected, show the tip-odds column and EV
+                if "BEST_ODDS_COL" in locals():
+                    display.append(BEST_ODDS_COL)
+                if "EV_COL" in locals():
+                    display.append(EV_COL)
+            # Detailed odds (H/D/V) only if bookmaker selected and NO single model selected
+            if has_bookmaker and not has_model:
                 display += ["H odds", "D odds", "V odds"]
             tree.configure(displaycolumns=display)
         except Exception:
@@ -871,14 +1002,14 @@ def run_app() -> None:
         _apply_displaycolumns()
         _update_odds_headers()
         try:
-            status_var.set("Kész.")
+            status_var.set("K\u00E9sz.")
         except Exception:
             pass
-        status_var.set("KĂ©sz.")
+        status_var.set("K\u00E9sz.")
     except Exception as exc:
-        print(f"[GUI] Hiba a feldolgozĂˇs sorĂˇn: {exc}")
+        print(f"[GUI] Hiba a feldolgoz\u00E1s sor\u00E1n: {exc}")
         try:
-            messagebox.showerror("Hiba", f"Hiba a feldolgozĂˇs sorĂˇn: {exc}")
+            messagebox.showerror("Hiba", f"Hiba a feldolgoz\u00E1s sor\u00E1n: {exc}")
         except Exception:
             pass
         # If DB exists, try opening read-only to show existing rows
@@ -896,7 +1027,7 @@ def run_app() -> None:
                     pass
         except Exception:
             pass
-        status_var.set("Hiba tĂ¶rtĂ©nt.")
+        status_var.set("Hiba t\u00F6rt\u00E9nt.")
 
     refresh_table(state)
     root.mainloop()
