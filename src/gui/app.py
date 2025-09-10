@@ -46,9 +46,7 @@ _MOJIBAKE_MAP: Dict[str, str] = {
     "Fogadƈiroda:": "Fogadóiroda:",
     "Keres�cs:": "Keresés:",
     "Friss��t�cs": "Frissítés",
-    "D��tum": "Dátum",
     "D�tum": "Dátum",
-    "D??tum": "Dátum",
     "K�csz.": "Kész.",
     "Hiba t�\u0014rt�cnt.": "Hiba történt.",
 }
