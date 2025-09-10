@@ -726,17 +726,48 @@ def run_app() -> None:
             items = tree.get_children("")
 
             def _key(i: str) -> Any:
-                val = tree.set(i, columns_all[col_index])
-                try:
-                    return float(val)
-                except Exception:
-                    # Try to parse trailing numeric token (e.g., "bookmaker 2.22")
+                import re
+
+                col = columns_all[col_index]
+                s = str(tree.set(i, col)).strip()
+                # Missing values go to the end on ascending
+                if not s:
+                    return (1, "")
+                # Date column: ISO-like 'YYYY-MM-DD HH:MM' (optionally with 'UTC')
+                if re.match(r"^\d{4}-\d{2}-\d{2}", s):
                     try:
-                        s = str(val).strip()
-                        last = s.split()[-1]
-                        return float(last)
+                        parts = s.split()
+                        dt_str = " ".join(parts[:2]) if len(parts) >= 2 else parts[0]
+                        from datetime import datetime
+
+                        dt = (
+                            datetime.strptime(dt_str, "%Y-%m-%d %H:%M")
+                            if " " in dt_str
+                            else datetime.strptime(dt_str, "%Y-%m-%d")
+                        )
+                        return (0, dt)
                     except Exception:
-                        return str(val)
+                        pass
+                # Percent at end e.g. '+5%'
+                m = re.search(r"([+-]?\d+(?:[.,]\d+)?)%$", s)
+                if m:
+                    try:
+                        return (0, float(m.group(1).replace(",", ".")))
+                    except Exception:
+                        pass
+                # Probability label like '1 (65%)'
+                m2 = re.search(r"\((\d+(?:\.\d+)?)%\)", s)
+                if m2:
+                    try:
+                        return (0, float(m2.group(1)))
+                    except Exception:
+                        pass
+                # Trailing numeric token (e.g., 'bookmaker 2.22' or '2.22')
+                last = s.split()[-1]
+                try:
+                    return (0, float(last))
+                except Exception:
+                    return (0, s.lower())
 
             sorted_items = sorted(items, key=_key, reverse=sort_reverse)
             for idx, iid in enumerate(sorted_items):
