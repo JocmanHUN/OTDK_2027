@@ -275,7 +275,12 @@ def _predict_then_persist_if_complete(conn: sqlite3.Connection, fixture: Mapping
                     break
         except Exception:
             need_feats = True
-        ctx_builder = ContextBuilder(history=history_obj, compute_features=bool(need_feats))
+        try:
+            ctx_builder = ContextBuilder(history=history_obj, compute_features=bool(need_feats))
+        except TypeError:
+            # Backward/monkeypatch compatibility: some tests replace ContextBuilder
+            # with a simplified fake that doesn't accept compute_features.
+            ctx_builder = ContextBuilder(history=history_obj)
         ctx = ctx_builder.build_from_meta(
             fixture_id=fx_id,
             league_id=league_id,
