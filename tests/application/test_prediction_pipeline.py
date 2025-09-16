@@ -31,6 +31,27 @@ class _HistFake:
         mu_away = (away.goals_for_away_avg + home.goals_against_home_avg) / 2.0
         return (mu_home, mu_away)
 
+    # New lightweight interfaces used by ContextBuilder
+    def get_recent_team_scores(
+        self, team_id: int, league_id: int, season: int, last: int, *, only_finished: bool = True
+    ) -> list[dict[str, Any]]:
+        # Provide a minimal set so Poisson recent-scores path has data
+        out: list[dict[str, Any]] = []
+        for i in range(max(1, last)):
+            out.append(
+                {
+                    "fixture_id": 1000 + i,
+                    "date_utc": datetime.now(timezone.utc),
+                    "home_away": "H" if i % 2 == 0 else "A",
+                    "goals_for": 1 + (i % 2),
+                    "goals_against": (i % 2),
+                }
+            )
+        return out[:last]
+
+    def league_goal_means(self, league_id: int, season: int) -> tuple[float, float]:
+        return (1.35, 1.15)
+
 
 class _PoissonDummy(BasePredictiveModel):
     name = ModelName.POISSON

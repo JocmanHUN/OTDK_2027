@@ -2,13 +2,14 @@
 
 import os
 import sqlite3
+import time
 import tkinter as tk
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import partial
 from pathlib import Path
 from tkinter import messagebox, ttk
-from typing import Any, Dict, Iterable, List, Mapping, Tuple, cast
+from typing import Any, Dict, List, Mapping, Tuple, cast
 
 from src.application.services.fixtures_service import FixturesService
 from src.application.services.history_service import HistoryService
@@ -50,6 +51,10 @@ _MOJIBAKE_MAP: Dict[str, str] = {
     "K?csz.": "K\u00e9sz.",
     "Hiba t?\u0014rt?cnt.": "Hiba t\u00f6rt\u00e9nt.",
 }
+
+# Global process-level throttles/state
+_RESULT_CHECKED_AT: Dict[int, float] = {}
+_LAST_RETRY_PRED_AT: float | None = None
 
 
 def _fix_mojibake(s: str) -> str:
@@ -158,144 +163,332 @@ def _ensure_league(conn: sqlite3.Connection, league_id: int) -> None:
             pass
 
 
-def _insert_matches(conn: sqlite3.Connection, fixtures: Iterable[Mapping[str, Any]]) -> None:
-    mrepo = MatchesRepoSqlite(conn)
-    for r in fixtures:
-        fx_id = int(r["fixture_id"])
-        league_id = int(r["league_id"])
-        season = int(r["season"]) if r.get("season") is not None else datetime.now().year
-        when = r.get("date_utc")
+def _predict_then_persist_if_complete(conn: sqlite3.Connection, fixture: Mapping[str, Any]) -> bool:
+    """Compute predictions for a fixture and persist only if all models predicted.
+
+    - Builds domain match and model context from the fixture metadata
+    - Runs all default models
+    - If any model returns no probabilities (SKIPPED), nothing is saved
+    - If all models return probabilities, saves: league (if needed), match, odds, predictions
+    Returns True if persisted, False otherwise.
+    """
+    try:
+        fx_id_val = fixture.get("fixture_id")
+        league_id_val = fixture.get("league_id")
+        if not isinstance(fx_id_val, int) or not isinstance(league_id_val, int):
+            return False
+        fx_id = int(fx_id_val)
+        league_id = int(league_id_val)
+        season = int(fixture.get("season") or datetime.now().year)
+        home_id = int(fixture.get("home_id") or 0)
+        away_id = int(fixture.get("away_id") or 0)
+        when = fixture.get("date_utc")
         if not isinstance(when, datetime):
             when = datetime.now(timezone.utc)
-        home_name = r.get("home_name") or str(r.get("home_id") or "?")
-        away_name = r.get("away_name") or str(r.get("away_id") or "?")
 
-        _ensure_league(conn, league_id)
+        # Check if all predictions already exist in DB for this match
+        try:
+            models = default_models()
+            expected_models: set[str] = set()
+            for m in models:
+                try:
+                    expected_models.add(str(m.name.value))
+                except Exception:
+                    expected_models.add(str(m.name))
+            cur = conn.execute(
+                "SELECT DISTINCT model_name FROM predictions WHERE match_id = ?",
+                (fx_id,),
+            )
+            present = {str(r[0]) for r in cur.fetchall()}
+            if expected_models and expected_models.issubset(present):
+                return True
+        except Exception:
+            pass
 
-        existing = mrepo.get_by_id(fx_id)
-        if existing is not None:
-            continue
-        m = DbMatch(
-            id=fx_id,
+        # Domain match + modeling context
+        status_raw = fixture.get("status")
+        try:
+            status = (
+                MatchStatus(status_raw) if isinstance(status_raw, str) else MatchStatus.SCHEDULED
+            )
+        except Exception:
+            status = MatchStatus.SCHEDULED
+
+        match = DomainMatch(
+            fixture_id=FixtureId(fx_id),
+            league_id=LeagueId(league_id),
+            season=season,
+            kickoff_utc=when,
+            home_name=str(fixture.get("home_name") or fixture.get("home_id") or ""),
+            away_name=str(fixture.get("away_name") or fixture.get("away_id") or ""),
+            status=status,
+        )
+
+        history = HistoryService()
+        # Compute features only if a model that needs them is present (e.g., logistic_regression)
+        need_feats = False
+        try:
+            for m in models:
+                name_str = str(getattr(m.name, "value", m.name))
+                if name_str == "logistic_regression":
+                    need_feats = True
+                    break
+        except Exception:
+            need_feats = True
+        ctx_builder = ContextBuilder(history=history, compute_features=bool(need_feats))
+        ctx = ctx_builder.build_from_meta(
+            fixture_id=fx_id,
             league_id=league_id,
             season=season,
-            date=when,
-            home_team=str(home_name),
-            away_team=str(away_name),
-            real_result=None,
+            home_team_id=home_id,
+            away_team_id=away_id,
         )
-        mrepo.insert(m)
 
+        agg = PredictionAggregatorImpl()
+        preds = agg.run_all(models, match, ctx)
 
-def _persist_odds(conn: sqlite3.Connection, fixtures: Iterable[Mapping[str, Any]]) -> None:
-    """Fetch odds via API and persist them into DB for each fixture id.
+        # All models must produce probabilities (no SKIPPED)
+        if any(p.probs is None for p in preds):
+            return False
 
-    - Ensures bookmaker names exist in `bookmakers` table (FK dependency).
-    - Upserts odds by (match_id, bookmaker_id).
-    """
-    svc = OddsService()
-    orepo = OddsRepoSqlite(conn)
-    brepo = BookmakersRepoSqlite(conn)
+        # Ensure league exists only now (since we will persist)
+        _ensure_league(conn, league_id)
 
-    for r in fixtures:
-        fx_id = r.get("fixture_id")
-        if not isinstance(fx_id, int):
-            continue
-        try:
-            odds_list = svc.get_fixture_odds(int(fx_id))
-            bm_names = svc.get_fixture_bookmakers(int(fx_id))
-        except Exception:
-            continue
-
-        # Ensure bookmaker names
-        for bid, name in bm_names.items():
-            try:
-                if brepo.get_by_id(int(bid)) is None:
-                    brepo.insert(Bookmaker(id=int(bid), name=str(name)))
-            except Exception:
-                # ignore races/duplicates
-                pass
-
-        # Upsert odds
-        for o in odds_list:
-            try:
-                orepo.insert(
-                    RepoOdds(
-                        id=None,
-                        match_id=int(getattr(o, "fixture_id", fx_id)),
-                        bookmaker_id=int(getattr(o, "bookmaker_id")),
-                        home=float(getattr(o, "home")),
-                        draw=float(getattr(o, "draw")),
-                        away=float(getattr(o, "away")),
-                    )
-                )
-            except Exception:
-                continue
-
-
-def _predict_and_store(conn: sqlite3.Connection, fixtures: Iterable[Mapping[str, Any]]) -> None:
-    history = HistoryService()
-    ctx_builder = ContextBuilder(history=history)
-    models = default_models()
-    agg = PredictionAggregatorImpl()
-    prepo = PredictionsRepoSqlite(conn)
-
-    for r in fixtures:
-        try:
-            fx_id_val = r.get("fixture_id")
-            league_id_val = r.get("league_id")
-            if not isinstance(fx_id_val, int) or not isinstance(league_id_val, int):
-                continue
-            fx_id = int(fx_id_val)
-            league_id = int(league_id_val)
-            season = int(r["season"]) if r.get("season") is not None else datetime.now().year
-            home_id = r.get("home_id")
-            away_id = r.get("away_id")
-            if not isinstance(home_id, int) or not isinstance(away_id, int):
-                continue
-
-            ctx = ctx_builder.build_from_meta(
-                fixture_id=fx_id,
+        # Insert match if not exists
+        mrepo = MatchesRepoSqlite(conn)
+        if mrepo.get_by_id(fx_id) is None:
+            db_match = DbMatch(
+                id=fx_id,
                 league_id=league_id,
                 season=season,
-                home_team_id=home_id,
-                away_team_id=away_id,
+                date=when,
+                home_team=str(fixture.get("home_name") or fixture.get("home_id") or ""),
+                away_team=str(fixture.get("away_name") or fixture.get("away_id") or ""),
+                real_result=None,
             )
+            mrepo.insert(db_match)
 
-            match = DomainMatch(
-                fixture_id=FixtureId(fx_id),
-                league_id=LeagueId(league_id),
-                season=season,
-                kickoff_utc=datetime.now(timezone.utc),
-                home_name=str(r.get("home_name") or home_id),
-                away_name=str(r.get("away_name") or away_id),
-                status=MatchStatus.SCHEDULED,
-            )
-
-            preds = agg.run_all(models, match, ctx)
-            for p in preds:
-                probs = p.probs
-                if probs is None:
+        # Persist odds for this fixture (and bookmaker names)
+        try:
+            svc = OddsService()
+            orepo = OddsRepoSqlite(conn)
+            brepo = BookmakersRepoSqlite(conn)
+            odds_list = svc.get_fixture_odds(int(fx_id))
+            bm_names = svc.get_fixture_bookmakers(int(fx_id))
+            for bid, name in bm_names.items():
+                try:
+                    if brepo.get_by_id(int(bid)) is None:
+                        brepo.insert(Bookmaker(id=int(bid), name=str(name)))
+                except Exception:
+                    pass
+            for o in odds_list:
+                try:
+                    orepo.insert(
+                        RepoOdds(
+                            id=None,
+                            match_id=int(getattr(o, "fixture_id", fx_id)),
+                            bookmaker_id=int(getattr(o, "bookmaker_id")),
+                            home=float(getattr(o, "home")),
+                            draw=float(getattr(o, "draw")),
+                            away=float(getattr(o, "away")),
+                        )
+                    )
+                except Exception:
                     continue
-                pr = probs
-                triple = [float(pr.home), float(pr.draw), float(pr.away)]
-                idx = int(max(range(3), key=lambda i: triple[i]))
-                pred_res = "1" if idx == 0 else ("X" if idx == 1 else "2")
-
-                dp = DbPrediction(
-                    id=None,
-                    match_id=fx_id,
-                    model_name=str(p.model.value if hasattr(p.model, "value") else p.model),
-                    prob_home=float(pr.home),
-                    prob_draw=float(pr.draw),
-                    prob_away=float(pr.away),
-                    predicted_result=pred_res,
-                    is_correct=None,
-                    result_status="PENDING",
-                )
-                prepo.insert(dp)
         except Exception:
-            continue
+            # Odds persistence issues are tolerated; match+preds already saved
+            pass
+
+        # Persist predictions
+        prepo = PredictionsRepoSqlite(conn)
+        for p in preds:
+            pr = p.probs
+            if pr is None:
+                continue
+            triple = [float(pr.home), float(pr.draw), float(pr.away)]
+            idx = int(max(range(3), key=lambda i: triple[i]))
+            pred_res = "1" if idx == 0 else ("X" if idx == 1 else "2")
+
+            dp = DbPrediction(
+                id=None,
+                match_id=fx_id,
+                model_name=str(p.model.value if hasattr(p.model, "value") else p.model),
+                prob_home=float(pr.home),
+                prob_draw=float(pr.draw),
+                prob_away=float(pr.away),
+                predicted_result=pred_res,
+                is_correct=None,
+                result_status="PENDING",
+            )
+            prepo.insert(dp)
+
+        return True
+    except Exception:
+        return False
+    """Compute predictions for a fixture and persist only if all models predicted.
+
+    - Builds domain match and model context from the fixture metadata
+    - Runs all default models
+    - If any model returns no probabilities (SKIPPED), nothing is saved
+    - If all models return probabilities, saves: league (if needed), match, odds, predictions
+    Returns True if persisted, False otherwise.
+    """
+    try:
+        fx_id_val = fixture.get("fixture_id")
+        league_id_val = fixture.get("league_id")
+        if not isinstance(fx_id_val, int) or not isinstance(league_id_val, int):
+            return False
+        fx_id = int(fx_id_val)
+        league_id = int(league_id_val)
+        season = int(fixture.get("season") or datetime.now().year)
+        home_id = int(fixture.get("home_id") or 0)
+        away_id = int(fixture.get("away_id") or 0)
+        when = fixture.get("date_utc")
+        if not isinstance(when, datetime):
+            when = datetime.now(timezone.utc)
+
+        # Check if all predictions already exist in DB for this match
+        try:
+            models = default_models()
+            expected_models_dup: set[str] = set()
+            for m in models:
+                try:
+                    expected_models_dup.add(str(m.name.value))
+                except Exception:
+                    expected_models_dup.add(str(m.name))
+            cur = conn.execute(
+                "SELECT DISTINCT model_name FROM predictions WHERE match_id = ?",
+                (fx_id,),
+            )
+            present = {str(r[0]) for r in cur.fetchall()}
+            if expected_models_dup and expected_models_dup.issubset(present):
+                return True
+        except Exception:
+            pass
+
+        # Domain match + modeling context
+        status_raw = fixture.get("status")
+        try:
+            status = (
+                MatchStatus(status_raw) if isinstance(status_raw, str) else MatchStatus.SCHEDULED
+            )
+        except Exception:
+            status = MatchStatus.SCHEDULED
+
+        match = DomainMatch(
+            fixture_id=FixtureId(fx_id),
+            league_id=LeagueId(league_id),
+            season=season,
+            kickoff_utc=when,
+            home_name=str(fixture.get("home_name") or fixture.get("home_id") or ""),
+            away_name=str(fixture.get("away_name") or fixture.get("away_id") or ""),
+            status=status,
+        )
+
+        history = HistoryService()
+        # Compute features only if a model that needs them is present (e.g., logistic_regression)
+        need_feats = False
+        try:
+            for m in models:
+                name_str = str(getattr(m.name, "value", m.name))
+                if name_str == "logistic_regression":
+                    need_feats = True
+                    break
+        except Exception:
+            need_feats = True
+        ctx_builder = ContextBuilder(history=history, compute_features=bool(need_feats))
+        ctx = ctx_builder.build_from_meta(
+            fixture_id=fx_id,
+            league_id=league_id,
+            season=season,
+            home_team_id=home_id,
+            away_team_id=away_id,
+        )
+
+        agg = PredictionAggregatorImpl()
+        preds = agg.run_all(models, match, ctx)
+
+        # All models must produce probabilities (no SKIPPED)
+        if any(p.probs is None for p in preds):
+            return False
+
+        # Ensure league exists only now (since we will persist)
+        _ensure_league(conn, league_id)
+
+        # Insert match if not exists
+        mrepo = MatchesRepoSqlite(conn)
+        if mrepo.get_by_id(fx_id) is None:
+            m = DbMatch(
+                id=fx_id,
+                league_id=league_id,
+                season=season,
+                date=when,
+                home_team=str(fixture.get("home_name") or fixture.get("home_id") or ""),
+                away_team=str(fixture.get("away_name") or fixture.get("away_id") or ""),
+                real_result=None,
+            )
+            mrepo.insert(m)
+
+        # Persist odds for this fixture (and bookmaker names)
+        try:
+            svc = OddsService()
+            orepo = OddsRepoSqlite(conn)
+            brepo = BookmakersRepoSqlite(conn)
+            odds_list = svc.get_fixture_odds(int(fx_id))
+            bm_names = svc.get_fixture_bookmakers(int(fx_id))
+            for bid, name in bm_names.items():
+                try:
+                    if brepo.get_by_id(int(bid)) is None:
+                        brepo.insert(Bookmaker(id=int(bid), name=str(name)))
+                except Exception:
+                    pass
+            for o in odds_list:
+                try:
+                    orepo.insert(
+                        RepoOdds(
+                            id=None,
+                            match_id=int(getattr(o, "fixture_id", fx_id)),
+                            bookmaker_id=int(getattr(o, "bookmaker_id")),
+                            home=float(getattr(o, "home")),
+                            draw=float(getattr(o, "draw")),
+                            away=float(getattr(o, "away")),
+                        )
+                    )
+                except Exception:
+                    continue
+        except Exception:
+            # Odds persistence issues are tolerated; match+preds already saved
+            pass
+
+        # Persist predictions
+        prepo = PredictionsRepoSqlite(conn)
+        for p in preds:
+            pr = p.probs
+            if pr is None:
+                continue
+            triple = [float(pr.home), float(pr.draw), float(pr.away)]
+            idx = int(max(range(3), key=lambda i: triple[i]))
+            pred_res = "1" if idx == 0 else ("X" if idx == 1 else "2")
+
+            dp = DbPrediction(
+                id=None,
+                match_id=fx_id,
+                model_name=str(p.model.value if hasattr(p.model, "value") else p.model),
+                prob_home=float(pr.home),
+                prob_draw=float(pr.draw),
+                prob_away=float(pr.away),
+                predicted_result=pred_res,
+                is_correct=None,
+                result_status="PENDING",
+            )
+            prepo.insert(dp)
+
+        return True
+    except Exception:
+        return False
+
+    # Legacy helper _predict_and_store removed; replaced by per-fixture
+    # _predict_then_persist_if_complete.
 
 
 def _read_tomorrow_from_db(
@@ -344,9 +537,9 @@ def _read_tomorrow_from_db(
 def _read_played_from_db(
     conn: sqlite3.Connection, *, days: int = 7
 ) -> Tuple[List[Tuple], Dict[int, Dict[str, Tuple[float, float, float, str | None]]]]:
-    """Return matches already played within the last `days` days with predictions.
+    """Return finished matches within the last `days` days with predictions.
 
-    Selects matches with date < now (UTC), bounded to a sliding window.
+    Uses status via persisted `real_result` instead of only date.
     """
     cur = conn.cursor()
     now_utc = datetime.now(timezone.utc)
@@ -355,7 +548,7 @@ def _read_played_from_db(
         """
         SELECT match_id, date, home_team, away_team
         FROM matches
-        WHERE date < ? AND date >= ?
+        WHERE real_result IN ('1','X','2') AND date < ? AND date >= ?
         ORDER BY date DESC
         """,
         (now_utc.isoformat(), start_utc.isoformat()),
@@ -393,6 +586,12 @@ def _update_missing_results(conn: sqlite3.Connection) -> None:
             wconn = _ensure_db()
         except Exception:
             wconn = conn
+        # Throttle per-fixture result checks within this process
+        global _RESULT_CHECKED_AT
+        try:
+            _RESULT_CHECKED_AT
+        except NameError:
+            _RESULT_CHECKED_AT = {}
         cur = wconn.execute(
             "SELECT match_id FROM matches WHERE real_result IS NULL AND date < ?",
             (datetime.now(timezone.utc).isoformat(),),
@@ -404,9 +603,17 @@ def _update_missing_results(conn: sqlite3.Connection) -> None:
         mrepo = MatchesRepoSqlite(wconn)
         for (mid,) in rows:
             try:
+                last_ts = (
+                    _RESULT_CHECKED_AT.get(int(mid))
+                    if isinstance(_RESULT_CHECKED_AT, dict)
+                    else None
+                )
+                if last_ts is not None and (time.time() - float(last_ts)) < 3600.0:
+                    continue
                 label = history.get_fixture_result_label(int(mid))
                 if label in {"1", "X", "2"}:
                     mrepo.update_result(int(mid), str(label))
+                _RESULT_CHECKED_AT[int(mid)] = time.time()
             except Exception:
                 continue
     except Exception:
@@ -472,6 +679,153 @@ class AppState:
     winners_only: bool = False
     winners_only_var: tk.BooleanVar | None = None
     winners_only_chk: ttk.Checkbutton | None = None
+    # Stats side panel
+    stats_frame: Any | None = None
+    stats_vars: Dict[str, tk.StringVar] | None = None
+
+
+def _update_model_stats_panel(
+    state: AppState,
+    filtered_matches: list[Tuple[Any, ...]],
+    preds_by_match: Dict[int, Dict[str, Tuple[float, float, float, str | None]]],
+) -> None:
+    try:
+        # Only show in played view with a single model selected
+        if not getattr(state, "show_played", False) or state.selected_model_key is None:
+            if state.stats_frame is not None:
+                try:
+                    state.stats_frame.grid_remove()
+                except Exception:
+                    pass
+            return
+
+        # Ensure side panel exists
+        if state.stats_frame is None or state.stats_vars is None:
+            return
+
+        model_key = state.selected_model_key
+        use_bm = state.selected_bookmaker_id is not None
+
+        total = 0
+        wins = 0
+        used = 0
+        sum_odds = 0.0
+        sum_ev = 0.0
+        pos_ev_win = 0
+
+        for mid, _dt_s, _home, _away in filtered_matches:
+            try:
+                try:
+                    mid_i = int(mid)
+                except Exception:
+                    continue
+                model_map = preds_by_match.get(mid_i, {})
+                trip = model_map.get(model_key) if isinstance(model_map, dict) else None
+                if not trip:
+                    continue
+                ph, pd, pa, pref = trip
+                if isinstance(pref, str) and pref in {"1", "X", "2"}:
+                    sel = pref
+                else:
+                    vals = [("1", float(ph)), ("X", float(pd)), ("2", float(pa))]
+                    sel, _ = max(vals, key=lambda x: x[1])
+
+                # Real result
+                rr = None
+                try:
+                    rrow = state.conn.execute(
+                        "SELECT real_result FROM matches WHERE match_id = ?",
+                        (mid_i,),
+                    ).fetchone()
+                    if rrow and isinstance(rrow[0], str):
+                        rr = rrow[0]
+                except Exception:
+                    rr = None
+                if rr not in {"1", "X", "2"}:
+                    continue
+
+                # Determine odds for the selected outcome
+                odd_val = None
+                if use_bm:
+                    try:
+                        row = state.conn.execute(
+                            "SELECT odds_home, odds_draw, odds_away FROM odds WHERE match_id = ? AND bookmaker_id = ? LIMIT 1",
+                            (mid_i, cast(int, state.selected_bookmaker_id)),
+                        ).fetchone()
+                        if row is not None:
+                            oh, od, oa = float(row[0]), float(row[1]), float(row[2])
+                            odd_val = oh if sel == "1" else (od if sel == "X" else oa)
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        best: Dict[str, float] = {}
+                        for bid_raw, oh, od, oa in state.conn.execute(
+                            "SELECT bookmaker_id, odds_home, odds_draw, odds_away FROM odds WHERE match_id = ?",
+                            (mid_i,),
+                        ).fetchall():
+                            ohf, odf, oaf = float(oh), float(od), float(oa)
+                            if ("1" not in best) or (ohf > best["1"]):
+                                best["1"] = ohf
+                            if ("X" not in best) or (odf > best["X"]):
+                                best["X"] = odf
+                            if ("2" not in best) or (oaf > best["2"]):
+                                best["2"] = oaf
+                        if sel in best:
+                            odd_val = best[sel]
+                    except Exception:
+                        pass
+
+                total += 1
+                if rr == sel:
+                    wins += 1
+
+                # If we have odds and probabilities, compute EV
+                p = float(ph) if sel == "1" else (float(pd) if sel == "X" else float(pa))
+                if odd_val is not None:
+                    used += 1
+                    sum_odds += float(odd_val)
+                    ev = p * float(odd_val) - 1.0
+                    sum_ev += ev
+                    if ev > 0 and rr == sel:
+                        pos_ev_win += 1
+            except Exception:
+                continue
+
+        # Compute metrics
+        hit_rate = (wins / total * 100.0) if total else 0.0
+        avg_odds = (sum_odds / used) if used else 0.0
+        avg_ev = (sum_ev / used * 100.0) if used else 0.0
+
+        if state.stats_vars is not None:
+            v = state.stats_vars.get("count")
+            if v is not None:
+                v.set(str(total))
+            v = state.stats_vars.get("hit")
+            if v is not None:
+                v.set(f"{hit_rate:.0f}% ({wins}/{total})")
+            v = state.stats_vars.get("avg_odds")
+            if v is not None:
+                v.set(f"{avg_odds:.2f}" if used else "-")
+            v = state.stats_vars.get("avg_ev")
+            if v is not None:
+                v.set(f"{avg_ev:+.0f}%" if used else "-")
+            v = state.stats_vars.get("pos_ev_win")
+            if v is not None:
+                v.set(str(pos_ev_win))
+
+        # Show the panel
+        try:
+            state.stats_frame.grid()
+        except Exception:
+            pass
+    except Exception:
+        # On any error, hide panel
+        try:
+            if state.stats_frame is not None:
+                state.stats_frame.grid_remove()
+        except Exception:
+            pass
 
 
 def _best_label_and_pct(
@@ -494,6 +848,28 @@ def refresh_table(state: AppState) -> None:
     try:
         _update_missing_results(state.conn)
         _reconcile_prediction_statuses(state.conn)
+    except Exception:
+        pass
+    # Opportunistic retry: for upcoming view, attempt to process fixtures not yet persisted
+    try:
+        if not getattr(state, "show_played", False):
+            global _LAST_RETRY_PRED_AT
+            import time as _t
+
+            last = _LAST_RETRY_PRED_AT
+            # Retry at most every 300s
+            if last is None or (_t.time() - float(last)) > 300.0:
+                try:
+                    write_conn = _ensure_db()
+                except Exception:
+                    write_conn = state.conn
+                fixtures = _select_fixtures_for_tomorrow()
+                for r in fixtures:
+                    try:
+                        _predict_then_persist_if_complete(write_conn, r)
+                    except Exception:
+                        pass
+                _LAST_RETRY_PRED_AT = _t.time()
     except Exception:
         pass
     if getattr(state, "show_played", False):
@@ -593,9 +969,10 @@ def refresh_table(state: AppState) -> None:
                     "SELECT odds_home, odds_draw, odds_away FROM odds WHERE match_id = ? AND bookmaker_id = ? LIMIT 1",
                     (int(mid), int(state.selected_bookmaker_id)),
                 )
-                r = cur.fetchone()
-                if r is not None:
-                    match_odds = (float(r[0]), float(r[1]), float(r[2]))
+                r_any = cur.fetchone()
+                if r_any is not None:
+                    r_t = cast(Tuple[float, float, float], r_any)
+                    match_odds = (float(r_t[0]), float(r_t[1]), float(r_t[2]))
             except Exception:
                 match_odds = None
 
@@ -703,6 +1080,12 @@ def refresh_table(state: AppState) -> None:
             pass
         state.tree.insert("", "end", iid=str(int(mid)), values=values, tags=tuple(row_tags))
 
+    # Update stats side panel if applicable
+    try:
+        _update_model_stats_panel(state, filtered, preds_by_match)
+    except Exception:
+        pass
+
 
 def _show_odds_window(tree: ttk.Treeview, fixture_id: int) -> None:
     try:
@@ -803,41 +1186,8 @@ def _show_odds_window_db(conn: sqlite3.Connection, tree: ttk.Treeview, fixture_i
         away = f"{float(o.away):.2f}"
         tv.insert("", "end", values=[bm_name, home, draw, away])
 
-
-def _tomorrow_bounds_iso() -> Tuple[str, str]:
-    today_utc = datetime.now(timezone.utc).date()
-    start = datetime.combine(
-        today_utc + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc
-    )
-    end = start + timedelta(days=1)
-    return start.isoformat(), end.isoformat()
-
-
-def _get_tomorrow_match_ids(conn: sqlite3.Connection) -> List[int]:
-    start, end = _tomorrow_bounds_iso()
-    cur = conn.execute(
-        "SELECT match_id FROM matches WHERE date >= ? AND date < ? ORDER BY date",
-        (start, end),
-    )
-    return [int(r[0]) for r in cur.fetchall()]
-
-
-def _models_for_match(conn: sqlite3.Connection, match_id: int) -> set[str]:
-    cur = conn.execute(
-        "SELECT DISTINCT model_name FROM predictions WHERE match_id = ?",
-        (match_id,),
-    )
-    return {str(r[0]) for r in cur.fetchall()}
-
-
-def _default_model_names() -> List[str]:
-    names: List[str] = []
-    for m in default_models():
-        try:
-            names.append(str(m.name.value))
-        except Exception:
-            names.append(str(m.name))
-    return names
+    # Removed old full-coverage helpers: _tomorrow_bounds_iso, _get_tomorrow_match_ids,
+    # _models_for_match, _default_model_names
 
 
 def run_app() -> None:
@@ -974,8 +1324,12 @@ def run_app() -> None:
     tree.grid(row=0, column=0, sticky="nsew")
     vsb.grid(row=0, column=1, sticky="ns")
     hsb.grid(row=1, column=0, sticky="ew")
+    # Right side stats panel placeholder
+    stats_frame = ttk.LabelFrame(root, text="Modell statisztik\u00e1k")
+    stats_frame.grid(row=0, column=2, rowspan=3, sticky="nsew", padx=(12, 6), pady=(0, 6))
     root.grid_rowconfigure(0, weight=1)
     root.grid_columnconfigure(0, weight=1)
+    root.grid_columnconfigure(2, weight=0)
 
     # Row coloring tags for correctness (applied only in played view)
     try:
@@ -1003,6 +1357,32 @@ def run_app() -> None:
     except Exception:
         pass
     state = AppState(conn=tmp_conn, tree=tree)
+    # Build stats label grid
+    try:
+        labels = [
+            ("Minta", "count"),
+            ("Tal\u00e1lati ar\u00e1ny", "hit"),
+            ("\u00c1tlag odds", "avg_odds"),
+            ("\u00c1tlag EV", "avg_ev"),
+            ("Pozit\u00edv EV nyertesek", "pos_ev_win"),
+        ]
+        stats_vars: Dict[str, tk.StringVar] = {}
+        for r, (lbl, key) in enumerate(labels):
+            ttk.Label(stats_frame, text=lbl + ":").grid(row=r, column=0, sticky="w", padx=6, pady=4)
+            var = tk.StringVar(value="-")
+            stats_vars[key] = var
+            ttk.Label(stats_frame, textvariable=var, anchor="e").grid(
+                row=r, column=1, sticky="e", padx=6, pady=4
+            )
+        state.stats_frame = stats_frame
+        state.stats_vars = stats_vars
+        # Hide by default until a model is selected in played view
+        try:
+            stats_frame.grid_remove()
+        except Exception:
+            pass
+    except Exception:
+        pass
 
     # Bookmaker filter UI (combobox)
     ttk.Label(btn_frame, text="Fogad\u00f3iroda:").pack(side=tk.LEFT, padx=(0, 6))
@@ -1250,30 +1630,14 @@ def run_app() -> None:
     # Run pipeline; keep window even on error
     try:
         write_conn = _ensure_db()
-        model_names = _default_model_names()
-
-        mids = _get_tomorrow_match_ids(write_conn)
-        full = False
-        if mids:
-            full = all(
-                set(model_names).issubset(_models_for_match(write_conn, mid)) for mid in mids
-            )
-
-        if not full:
-            fixtures = _select_fixtures_for_tomorrow()
-            _insert_matches(write_conn, fixtures)
-            # Persist odds so the GUI odds window can read from DB
-            _persist_odds(write_conn, fixtures)
-            # Compute only for fixtures missing some models
-            todo: List[Mapping[str, Any]] = []
-            for r in fixtures:
-                fx_id = r.get("fixture_id")
-                if isinstance(fx_id, int):
-                    present = _models_for_match(write_conn, int(fx_id))
-                    if not set(model_names).issubset(present):
-                        todo.append(r)
-            if todo:
-                _predict_and_store(write_conn, todo)
+        # Always refresh holnapi meccsek, and per-fixture csak akkor mentünk,
+        # ha minden modell tudott prediktálni.
+        fixtures = _select_fixtures_for_tomorrow()
+        for fx in fixtures:
+            try:
+                _predict_then_persist_if_complete(write_conn, fx)
+            except Exception:
+                pass
 
         try:
             write_conn.close()

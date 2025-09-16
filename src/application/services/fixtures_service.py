@@ -66,8 +66,9 @@ class FixturesService:
     def _fetch_all_pages(self, params: Mapping[str, Any]) -> list[Mapping[str, Any]]:
         out: list[Mapping[str, Any]] = []
 
-        # First call: without explicit page parameter to avoid API errors
+        # First call: start with page=1 to stabilize paging behavior
         first_params = dict(params)
+        first_params["page"] = "1"
         payload = self._client.get("fixtures", params=first_params)
         batch = _extract_response_list(payload)
         out.extend(batch)
@@ -81,6 +82,16 @@ class FixturesService:
                 more_params["page"] = str(page)
                 payload = self._client.get("fixtures", params=more_params)
                 batch = _extract_response_list(payload)
+                out.extend(batch)
+        else:
+            # Some API responses might omit paging; probe a few pages defensively
+            for page in range(2, 6):  # probe up to page 5
+                more_params = dict(params)
+                more_params["page"] = str(page)
+                payload = self._client.get("fixtures", params=more_params)
+                batch = _extract_response_list(payload)
+                if not batch:
+                    break
                 out.extend(batch)
         return out
 

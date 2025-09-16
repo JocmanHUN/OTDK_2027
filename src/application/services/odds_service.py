@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping, Optional, Protocol
@@ -34,10 +35,13 @@ class OddsService:
             self._client = client
 
         self._bookmaker_cache = TTLCache[str, int](ttl_seconds)
+        # Cache full odds payload per fixture to avoid double /odds calls in one session
+        self._fixture_payload_cache = TTLCache[int, Any](min(ttl_seconds, 5 * 60))
+        # Negative cache for fixtures that currently have no 1X2 market
+        self._fixture_negative_cache = TTLCache[int, bool](30.0)
 
     def get_fixture_odds(self, fixture_id: int | FixtureId) -> list[Odds]:
-        params = {"fixture": str(int(fixture_id))}
-        payload = self._client.get("odds", params)
+        payload = self._get_payload_for_fixture(int(fixture_id))
         items = _extract_response_list(payload)
         out: list[Odds] = []
 
@@ -94,8 +98,7 @@ class OddsService:
 
         Uses the same /odds payload but extracts identifiers and human names.
         """
-        params = {"fixture": str(int(fixture_id))}
-        payload = self._client.get("odds", params)
+        payload = self._get_payload_for_fixture(int(fixture_id))
         items = _extract_response_list(payload)
         out: dict[int, str] = {}
         for item in items:
@@ -104,7 +107,56 @@ class OddsService:
                 bm_name = bm.get("name")
                 if bm_id is not None and isinstance(bm_name, str) and bm_name:
                     out[int(bm_id)] = bm_name
+        # Soft-retry once if nothing found
+        if not out:
+            try:
+                time.sleep(1.2)
+            except Exception:
+                pass
+            payload = self._get_payload_for_fixture(int(fixture_id), force_refresh=True)
+            items = _extract_response_list(payload)
+            for item in items:
+                for bm in item.get("bookmakers", []) or []:
+                    bm_id = _safe_int(bm.get("id"))
+                    bm_name = bm.get("name")
+                    if bm_id is not None and isinstance(bm_name, str) and bm_name:
+                        out[int(bm_id)] = str(bm_name)
         return out
+
+    def _get_payload_for_fixture(self, fixture_id: int, *, force_refresh: bool = False) -> Any:
+        if not force_refresh:
+            cached = self._fixture_payload_cache.get(int(fixture_id))
+            if cached is not None:
+                return cached
+            # If recently observed as having no 1X2, avoid hammering
+            if self._fixture_negative_cache.get(int(fixture_id)):
+                return {"response": []}
+        params = {"fixture": str(int(fixture_id))}
+        payload = self._client.get("odds", params)
+        # Cache logic: cache only payloads that include a 1X2 market; else short negative cache
+        try:
+            items = _extract_response_list(payload)
+            has_1x2 = False
+            for item in items:
+                for bm in item.get("bookmakers", []) or []:
+                    bets = bm.get("bets") or bm.get("markets") or []
+                    for bet in bets:
+                        name = str(bet.get("name") or "").strip().lower()
+                        if name in {"match winner", "1x2"}:
+                            has_1x2 = True
+                            break
+                    if has_1x2:
+                        break
+            if has_1x2:
+                self._fixture_payload_cache.set(int(fixture_id), payload)
+            else:
+                self._fixture_negative_cache.set(int(fixture_id), True)
+        except Exception:
+            try:
+                self._fixture_negative_cache.set(int(fixture_id), True)
+            except Exception:
+                pass
+        return payload
 
 
 def _extract_response_list(payload: Any) -> list[Mapping[str, Any]]:

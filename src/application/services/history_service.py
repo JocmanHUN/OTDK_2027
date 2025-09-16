@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Mapping, Optional, Protocol
 
+from src.infrastructure.ttl_cache import TTLCache
+
 
 class _ClientProto(Protocol):
     def get(self, path: str, params: Mapping[str, Any] | None = None) -> Any: ...
@@ -41,13 +43,20 @@ class HistoryService:
     - Simple Poisson means and Elo input scaffold
     """
 
-    def __init__(self, client: Optional[_ClientProto] = None) -> None:
+    def __init__(
+        self, client: Optional[_ClientProto] = None, *, cache_ttl_seconds: float = 15 * 60
+    ) -> None:
         if client is None:
             from src.infrastructure.api_football_client import APIFootballClient as _Client
 
             self._client: _ClientProto = _Client()
         else:
             self._client = client
+        # Lightweight in-memory caches to reduce repeated API calls during a session
+        self._cache_team_avg = TTLCache[tuple[int, int, int], TeamAverages](cache_ttl_seconds)
+        self._cache_recent_stats = TTLCache[tuple[int, int, int, int], list](cache_ttl_seconds)
+        self._cache_fixture_stats = TTLCache[int, dict[int, dict[str, float]]](cache_ttl_seconds)
+        self._cache_league_means = TTLCache[tuple[int, int], tuple[float, float]](cache_ttl_seconds)
 
     # --------------------------- Head-to-head ---------------------------
     def get_head_to_head(
@@ -103,6 +112,10 @@ class HistoryService:
 
     # --------------------------- Team statistics ---------------------------
     def get_team_averages(self, team_id: int, league_id: int, season: int) -> TeamAverages:
+        key = (int(team_id), int(league_id), int(season))
+        cached = self._cache_team_avg.get(key)
+        if cached is not None:
+            return cached
         params = {"team": str(team_id), "league": str(league_id), "season": str(season)}
         payload = self._client.get("teams/statistics", params)
 
@@ -124,7 +137,7 @@ class HistoryService:
         ga_home = _safe_float(_get(["response", "goals", "against", "average", "home"], 0.0))
         ga_away = _safe_float(_get(["response", "goals", "against", "average", "away"], 0.0))
 
-        return TeamAverages(
+        result = TeamAverages(
             matches_home=matches_home,
             matches_away=matches_away,
             goals_for_home_avg=gf_home,
@@ -132,6 +145,11 @@ class HistoryService:
             goals_against_home_avg=ga_home,
             goals_against_away_avg=ga_away,
         )
+        try:
+            self._cache_team_avg.set(key, result)
+        except Exception:
+            pass
+        return result
 
     # --------------------------- Derived inputs ---------------------------
     def simple_poisson_means(self, home: TeamAverages, away: TeamAverages) -> tuple[float, float]:
@@ -180,6 +198,12 @@ class HistoryService:
         needed = int(last)
         cur_season = int(season)
         collected: list[dict[str, Any]] = []
+
+        # Cache hit for this (team, league, season, last)
+        ckey = (int(team_id), int(league_id), int(season), int(last))
+        cached = self._cache_recent_stats.get(ckey)
+        if cached is not None:
+            return cached
 
         while needed > 0 and cur_season >= 2000:  # basic guard
             fixtures = self._fetch_team_fixtures_for_season(
@@ -235,7 +259,91 @@ class HistoryService:
 
             cur_season -= 1
 
+        result = collected[:last]
+        try:
+            self._cache_recent_stats.set(ckey, result)
+        except Exception:
+            pass
+        return result
+
+    # --------------------------- Recent team scores (cheap) ---------------------------
+    def get_recent_team_scores(
+        self,
+        team_id: int,
+        league_id: int,
+        season: int,
+        last: int,
+        *,
+        only_finished: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Return the last N league fixtures for a team with only goals and home/away flags.
+
+        Uses only GET /fixtures (no /fixtures/statistics), so it's much cheaper.
+        Each row: {fixture_id, date_utc, home_away: 'H'|'A', goals_for, goals_against}
+        """
+        needed = int(last)
+        cur_season = int(season)
+        collected: list[dict[str, Any]] = []
+
+        while needed > 0 and cur_season >= 2000:
+            fixtures = self._fetch_team_fixtures_for_season(
+                team_id, league_id, cur_season, only_finished=only_finished
+            )
+            fixtures.sort(key=lambda r: r.get("timestamp", 0), reverse=True)
+            for fx in fixtures:
+                if needed <= 0:
+                    break
+                f_id = fx.get("id")
+                ts = fx.get("timestamp")
+                dt = (
+                    datetime.fromtimestamp(int(ts), tz=timezone.utc)
+                    if ts
+                    else _to_utc(str(fx.get("date", "")))
+                )
+                teams = fx.get("teams") or {}
+                home = teams.get("home") or {}
+                is_home = int(home.get("id") or -1) == int(team_id)
+                goals = fx.get("goals") or {}
+                gf = int(goals.get("home") or 0) if is_home else int(goals.get("away") or 0)
+                ga = int(goals.get("away") or 0) if is_home else int(goals.get("home") or 0)
+
+                collected.append(
+                    {
+                        "fixture_id": int(f_id) if f_id is not None else None,
+                        "date_utc": dt,
+                        "home_away": "H" if is_home else "A",
+                        "goals_for": gf,
+                        "goals_against": ga,
+                    }
+                )
+                needed -= 1
+            cur_season -= 1
+
         return collected[:last]
+
+    # --------------------------- League goal means (cheap) ---------------------------
+    def league_goal_means(self, league_id: int, season: int) -> tuple[float, float]:
+        """Return (mu_home, mu_away) as league-level goal averages for a season.
+
+        Computes from finished fixtures and caches the result.
+        """
+        key = (int(league_id), int(season))
+        cached = self._cache_league_means.get(key)
+        if cached is not None:
+            return cached
+        fixtures = self.get_league_finished_fixtures(league_id, season)
+        if not fixtures:
+            # Sensible global prior if league data is unavailable
+            prior = (1.35, 1.15)
+            self._cache_league_means.set(key, prior)
+            return prior
+        h = [float(r.get("home_goals", 0.0)) for r in fixtures]
+        a = [float(r.get("away_goals", 0.0)) for r in fixtures]
+        mu_h = sum(h) / len(h) if h else 1.3
+        mu_a = sum(a) / len(a) if a else 1.1
+        out = (mu_h, mu_a)
+        self._cache_league_means.set(key, out)
+        return out
 
     # --------------------------- League finished fixtures for a season ---------------------------
     def get_league_finished_fixtures(self, league_id: int, season: int) -> list[dict[str, Any]]:
@@ -343,6 +451,9 @@ class HistoryService:
 
         Output mapping: { team_id: { stat_name: value_float, ... }, ... }
         """
+        cached = self._cache_fixture_stats.get(int(fixture_id))
+        if cached is not None:
+            return cached
         payload = self._client.get("fixtures/statistics", {"fixture": str(int(fixture_id))})
         result: dict[int, dict[str, float]] = {}
         if isinstance(payload, Mapping):
@@ -360,6 +471,10 @@ class HistoryService:
                     if norm is not None and name:
                         bucket[name] = norm
                 result[int(t_id)] = bucket
+        try:
+            self._cache_fixture_stats.set(int(fixture_id), result)
+        except Exception:
+            pass
         return result
 
     # --------------------------- Fixture result ---------------------------
