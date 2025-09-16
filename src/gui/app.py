@@ -224,7 +224,47 @@ def _predict_then_persist_if_complete(conn: sqlite3.Connection, fixture: Mapping
             status=status,
         )
 
-        history = HistoryService()
+        history_obj: Any
+        try:
+            history_obj = HistoryService()
+        except Exception:
+            # Lightweight fallback that satisfies the ContextBuilder history protocol
+            class _HistoryFallback:
+                def get_recent_team_scores(
+                    self,
+                    team_id: int,
+                    league_id: int,
+                    season: int,
+                    last: int,
+                    *,
+                    only_finished: bool = True,
+                ) -> list[dict[str, Any]]:
+                    return []
+
+                def league_goal_means(self, league_id: int, season: int) -> tuple[float, float]:
+                    return (1.35, 1.15)
+
+                def get_team_averages(self, team_id: int, league_id: int, season: int) -> Any:
+                    class _TA:
+                        goals_for_home_avg = 1.3
+                        goals_for_away_avg = 1.1
+                        goals_against_home_avg = 1.2
+                        goals_against_away_avg = 1.2
+
+                    return _TA()
+
+                def simple_poisson_means(self, home: Any, away: Any) -> tuple[float, float]:
+                    mu_h = (
+                        float(getattr(home, "goals_for_home_avg", 1.3))
+                        + float(getattr(away, "goals_against_away_avg", 1.2))
+                    ) / 2.0
+                    mu_a = (
+                        float(getattr(away, "goals_for_away_avg", 1.1))
+                        + float(getattr(home, "goals_against_home_avg", 1.2))
+                    ) / 2.0
+                    return (mu_h, mu_a)
+
+            history_obj = _HistoryFallback()
         # Compute features only if a model that needs them is present (e.g., logistic_regression)
         need_feats = False
         try:
@@ -235,7 +275,7 @@ def _predict_then_persist_if_complete(conn: sqlite3.Connection, fixture: Mapping
                     break
         except Exception:
             need_feats = True
-        ctx_builder = ContextBuilder(history=history, compute_features=bool(need_feats))
+        ctx_builder = ContextBuilder(history=history_obj, compute_features=bool(need_feats))
         ctx = ctx_builder.build_from_meta(
             fixture_id=fx_id,
             league_id=league_id,
