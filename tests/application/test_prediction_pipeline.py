@@ -84,6 +84,22 @@ class _PoissonDummy(BasePredictiveModel):
         )
 
 
+class _EloDummy(BasePredictiveModel):
+    name = ModelName.ELO
+    version = "1"
+
+    def predict(self, match: Match, ctx: ModelContext) -> Prediction:
+        assert ctx.home_team_id is not None and ctx.away_team_id is not None
+        return Prediction(
+            fixture_id=match.fixture_id,
+            model=self.name,
+            probs=ProbabilityTriplet(home=1.0, draw=0.0, away=0.0),
+            computed_at_utc=datetime.now(timezone.utc),
+            version=self.version,
+            status=PredictionStatus.OK,
+        )
+
+
 def test_context_builder_and_aggregator() -> None:
     builder = ContextBuilder(history=_HistFake())
     ctx = builder.build_from_meta(
@@ -101,5 +117,6 @@ def test_context_builder_and_aggregator() -> None:
         status=MatchStatus.SCHEDULED,
     )
     agg = PredictionAggregatorImpl()
-    preds = agg.run_all([_PoissonDummy()], match, ctx)
-    assert len(preds) == 1 and preds[0].status == PredictionStatus.OK
+    preds = agg.run_all([_PoissonDummy(), _EloDummy()], match, ctx)
+    assert len(preds) == 2
+    assert all(p.status == PredictionStatus.OK for p in preds)

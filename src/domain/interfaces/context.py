@@ -48,7 +48,9 @@ class ModelContext(BaseModel):
             case ModelName.POISSON:
                 return self.home_goal_rate is not None and self.away_goal_rate is not None
             case ModelName.ELO:
-                return self.elo_home is not None and self.elo_away is not None
+                if self.elo_home is not None and self.elo_away is not None:
+                    return True
+                return self.home_team_id is not None and self.away_team_id is not None
             case ModelName.LOGISTIC_REGRESSION:
                 return self.features is not None
             case _:

@@ -50,8 +50,8 @@ def test_pagination_and_param_forwarding() -> None:
 
     assert len(rows) == 2
     assert rows[0]["fixture_id"] == 101 and rows[1]["fixture_id"] == 102
-    # First call may omit page (API prefers no 'page' on first request)
-    assert ("page" not in client.calls[0]) or (client.calls[0]["page"] in (1, "1"))
+    # First call should omit page (some API queries reject page=1)
+    assert "page" not in client.calls[0]
     assert client.calls[0]["timezone"] == "Europe/Budapest"
     assert str(client.calls[0]["league"]) == "39" and str(client.calls[0]["season"]) == "2025"
     # Second page requested
@@ -93,3 +93,31 @@ def test_empty_response() -> None:
     svc = FixturesService(client=client)
     rows = svc.get_daily_fixtures("2025-03-10")
     assert rows == []
+
+
+def test_page_probe_aborts_when_api_rejects() -> None:
+    first_payload = {
+        "response": [
+            {
+                "fixture": {
+                    "id": 555,
+                    "date": "2025-03-10T12:00:00+00:00",
+                    "status": {"short": "NS"},
+                },
+                "league": {"id": 9, "season": 2025},
+                "teams": {"home": {"id": 1, "name": "Foo"}, "away": {"id": 2, "name": "Bar"}},
+            }
+        ]
+    }
+    error_payload = {
+        "errors": {"page": "The Page field do not exist."},
+        "response": [],
+    }
+    client = _FakeClient([first_payload, error_payload])
+    svc = FixturesService(client=client)
+    rows = svc.get_daily_fixtures("2025-03-10")
+
+    assert len(rows) == 1
+    assert len(client.calls) == 2  # first call + single failed probe
+    assert "page" not in client.calls[0]
+    assert client.calls[1]["page"] in (2, "2")

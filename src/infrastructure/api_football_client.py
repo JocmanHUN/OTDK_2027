@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import logging
+import os
 import random
 import time
+from datetime import datetime
 from typing import Any, Mapping, Optional, Protocol, cast
 
 import requests
@@ -15,6 +17,27 @@ class _HasHeaders(Protocol):
 
 
 logger = logging.getLogger(__name__)
+_TRUE_SET = {"1", "true", "yes", "on"}
+try:
+    _RATE_LIMIT_SLEEP_SECONDS = max(0.0, float(os.getenv("API_FOOTBALL_429_SLEEP_SECONDS", "60")))
+except ValueError:
+    _RATE_LIMIT_SLEEP_SECONDS = 60.0
+
+
+def _env_flag(value: Optional[str]) -> bool:
+    if value is None:
+        return False
+    return value.strip().lower() in _TRUE_SET
+
+
+_GLOBAL_LOG_RESPONSES = _env_flag(os.getenv("API_FOOTBALL_LOG_RESPONSES"))
+
+
+def set_api_response_logging(enabled: bool) -> None:
+    """Globally enable/disable dumping raw API responses to stdout."""
+
+    global _GLOBAL_LOG_RESPONSES
+    _GLOBAL_LOG_RESPONSES = bool(enabled)
 
 
 class APIError(RuntimeError):
@@ -32,6 +55,7 @@ class APIFootballClient:
     - Auth via ``x-apisports-key`` or RapidAPI headers (from settings).
     - Configurable timeout, retry count and exponential backoff with jitter.
     - Special handling for HTTP 429 and 5xx responses.
+    - Optional stdout logging of every API response (for GUI debug sessions).
     """
 
     def __init__(
@@ -41,11 +65,16 @@ class APIFootballClient:
         timeout: Optional[float] = None,
         max_retries: int = 3,
         backoff_factor: float = 0.5,
+        *,
+        log_responses: bool | None = None,
     ) -> None:
         self.base_url = (base_url or settings.base_url).rstrip("/")
         self.timeout = float(timeout if timeout is not None else settings.timeout)
         self.max_retries = int(max_retries)
         self.backoff_factor = float(backoff_factor)
+        self._log_responses = (
+            _GLOBAL_LOG_RESPONSES if log_responses is None else bool(log_responses)
+        )
 
         self._session = requests.Session()
         # Merge default headers from settings with any provided overrides
@@ -75,16 +104,39 @@ class APIFootballClient:
                 resp = self._session.request(
                     method="GET", url=url, params=norm_params, timeout=self.timeout
                 )
+                self._log_http_response(url, norm_params, resp)
 
                 # Success
                 if 200 <= resp.status_code < 300:
                     if resp.headers.get("Content-Type", "").startswith("application/json"):
-                        return resp.json()
+                        payload = resp.json()
+                        if _payload_has_rate_limit_error(payload):
+                            retry_after = self._compute_sleep_seconds(attempt, resp)
+                            retry_after = max(
+                                float(_RATE_LIMIT_SLEEP_SECONDS),
+                                float(retry_after),
+                            )
+                            logger.warning(
+                                "APIFootballClient GET %s hit JSON rateLimit error. Retrying in %.2fs "
+                                "(attempt %d/%d)",
+                                url,
+                                retry_after,
+                                attempt + 1,
+                                self.max_retries,
+                            )
+                            attempt += 1
+                            if attempt > self.max_retries:
+                                break
+                            time.sleep(retry_after)
+                            continue
+                        return payload
                     return resp.text
 
                 # Rate limited or server error -> retry
                 if resp.status_code == 429 or 500 <= resp.status_code < 600:
                     retry_after = self._compute_sleep_seconds(attempt, resp)
+                    if resp.status_code == 429:
+                        retry_after = max(float(_RATE_LIMIT_SLEEP_SECONDS), float(retry_after))
                     logger.warning(
                         "APIFootballClient GET %s failed with %s. Retrying in %.2fs (attempt %d/%d)",
                         url,
@@ -163,3 +215,43 @@ class APIFootballClient:
             else:
                 out[key] = v
         return out
+
+    def _log_http_response(
+        self,
+        url: str,
+        params: Optional[Mapping[str, Any]],
+        resp: requests.Response,
+    ) -> None:
+        if not self._log_responses:
+            return
+        try:
+            ts = datetime.now().isoformat(timespec="seconds")
+        except Exception:
+            ts = ""
+        prefix = f"[API RESPONSE] {ts} GET {url} status={resp.status_code}"
+        if params:
+            prefix = f"{prefix} params={dict(params)}"
+        print(prefix, flush=True)
+        try:
+            print(resp.text, flush=True)
+        except Exception as exc:
+            print(f"<unable to read body: {exc}>", flush=True)
+
+
+def _payload_has_rate_limit_error(payload: Any) -> bool:
+    if not isinstance(payload, Mapping):
+        return False
+    errors = payload.get("errors")
+    if not isinstance(errors, Mapping):
+        return False
+    for key, value in errors.items():
+        key_str = str(key).lower()
+        if key_str in {"ratelimit", "rate_limit"} and value:
+            if isinstance(value, str):
+                return bool(value.strip())
+            if isinstance(value, Mapping):
+                return bool(value)
+            if isinstance(value, list):
+                return bool(value)
+            return True
+    return False

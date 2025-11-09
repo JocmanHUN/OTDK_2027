@@ -125,8 +125,6 @@ class ContextBuilder:
             away_team_id=TeamId(int(away_team_id)),
             home_goal_rate=float(mu_home),
             away_goal_rate=float(mu_away),
-            elo_home=float(init_elo),
-            elo_away=float(init_elo),
             home_advantage=float(home_advantage),
             features=feats,
         )

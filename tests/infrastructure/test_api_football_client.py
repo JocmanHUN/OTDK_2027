@@ -134,15 +134,15 @@ def test_retry_exhaustion_raises(monkeypatch: pytest.MonkeyPatch) -> None:
         client.get("status")
 
 
-def test_retry_after_header_used(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_429_without_retry_after_waits_minute(monkeypatch: pytest.MonkeyPatch) -> None:
     seq = [
-        _FakeResponse(429, text="rate", headers={"Retry-After": "2", "Content-Type": "text/plain"}),
+        _FakeResponse(429, text="rate", headers={"Content-Type": "text/plain"}),
         _FakeResponse(200, json_data={"ok": True}),
     ]
 
     sleep_calls: list[float] = []
 
-    def fake_sleep(s: float) -> None:  # noqa: D401
+    def fake_sleep(s: float) -> None:
         sleep_calls.append(s)
 
     def fake_request(
@@ -156,7 +156,66 @@ def test_retry_after_header_used(monkeypatch: pytest.MonkeyPatch) -> None:
 
     data = client.get("status")
     assert data == {"ok": True}
-    assert sleep_calls and abs(sleep_calls[0] - 2.0) < 1e-6
+    assert sleep_calls and abs(sleep_calls[0] - 60.0) < 1e-6
+
+
+def test_429_retry_after_longer_than_minimum_respected(monkeypatch: pytest.MonkeyPatch) -> None:
+    seq = [
+        _FakeResponse(
+            429, text="rate", headers={"Retry-After": "120", "Content-Type": "text/plain"}
+        ),
+        _FakeResponse(200, json_data={"ok": True}),
+    ]
+
+    sleep_calls: list[float] = []
+
+    def fake_sleep(s: float) -> None:
+        sleep_calls.append(s)
+
+    def fake_request(
+        method: str, url: str, params: Any | None = None, timeout: float | None = None
+    ) -> _FakeResponse:
+        return seq.pop(0)
+
+    client = APIFootballClient(max_retries=2, backoff_factor=0)
+    monkeypatch.setattr(client._session, "request", fake_request)
+    monkeypatch.setattr("time.sleep", fake_sleep)
+
+    data = client.get("status")
+    assert data == {"ok": True}
+    assert sleep_calls and abs(sleep_calls[0] - 120.0) < 1e-6
+
+
+def test_json_rate_limit_error_triggers_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    seq = [
+        _FakeResponse(
+            200,
+            json_data={
+                "errors": {
+                    "rateLimit": "Too many requests. Your rate limit is 300 requests per minute."
+                }
+            },
+        ),
+        _FakeResponse(200, json_data={"ok": True}),
+    ]
+
+    sleep_calls: list[float] = []
+
+    def fake_sleep(s: float) -> None:
+        sleep_calls.append(s)
+
+    def fake_request(
+        method: str, url: str, params: Any | None = None, timeout: float | None = None
+    ) -> _FakeResponse:
+        return seq.pop(0)
+
+    client = APIFootballClient(max_retries=2, backoff_factor=0)
+    monkeypatch.setattr(client._session, "request", fake_request)
+    monkeypatch.setattr("time.sleep", fake_sleep)
+
+    data = client.get("fixtures")
+    assert data == {"ok": True}
+    assert sleep_calls and abs(sleep_calls[0] - 60.0) < 1e-6
 
 
 def test_backoff_without_retry_after(monkeypatch: pytest.MonkeyPatch) -> None:

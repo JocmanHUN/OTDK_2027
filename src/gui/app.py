@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import os
 import sqlite3
@@ -19,6 +19,7 @@ from src.application.services.prediction_pipeline import ContextBuilder, Predict
 from src.domain.entities.match import Match as DomainMatch
 from src.domain.value_objects.enums import MatchStatus
 from src.domain.value_objects.ids import FixtureId, LeagueId
+from src.infrastructure.api_football_client import set_api_response_logging
 from src.models import default_models
 from src.repositories.bookmakers import Bookmaker
 from src.repositories.leagues import League
@@ -1243,6 +1244,12 @@ def run_app() -> None:
     # Ensure proper accented title regardless of source encoding
     try:
         root.title("Holnapi meccsek \u00e9s predikci\u00f3k")
+    except Exception:
+        pass
+
+    # Dump raw API responses while the GUI-triggered pipeline runs (debug aid)
+    try:
+        set_api_response_logging(True)
     except Exception:
         pass
 

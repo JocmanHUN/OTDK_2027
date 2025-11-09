@@ -66,32 +66,32 @@ class FixturesService:
     def _fetch_all_pages(self, params: Mapping[str, Any]) -> list[Mapping[str, Any]]:
         out: list[Mapping[str, Any]] = []
 
-        # First call: start with page=1 to stabilize paging behavior
-        first_params = dict(params)
-        first_params["page"] = "1"
-        payload = self._client.get("fixtures", params=first_params)
+        base_params = dict(params)
+        payload = self._client.get("fixtures", params=base_params)
         batch = _extract_response_list(payload)
         out.extend(batch)
 
-        # Additional pages if needed
-        paging = payload.get("paging") if isinstance(payload, Mapping) else None
-        total = int(paging.get("total")) if paging and paging.get("total") is not None else 1
-        if total and total > 1:
-            for page in range(2, total + 1):
-                more_params = dict(params)
+        total_pages = _extract_total_pages(payload)
+        if total_pages is None:
+            # paging info missing → probe a few pages but stop if API rejects 'page'
+            for page in range(2, 6):
+                more_params = dict(base_params)
                 more_params["page"] = str(page)
-                payload = self._client.get("fixtures", params=more_params)
-                batch = _extract_response_list(payload)
-                out.extend(batch)
-        else:
-            # Some API responses might omit paging; probe a few pages defensively
-            for page in range(2, 6):  # probe up to page 5
-                more_params = dict(params)
-                more_params["page"] = str(page)
-                payload = self._client.get("fixtures", params=more_params)
-                batch = _extract_response_list(payload)
+                next_payload = self._client.get("fixtures", params=more_params)
+                if _has_page_error(next_payload):
+                    break
+                batch = _extract_response_list(next_payload)
                 if not batch:
                     break
+                out.extend(batch)
+        elif total_pages > 1:
+            for page in range(2, total_pages + 1):
+                more_params = dict(base_params)
+                more_params["page"] = str(page)
+                next_payload = self._client.get("fixtures", params=more_params)
+                if _has_page_error(next_payload):
+                    break
+                batch = _extract_response_list(next_payload)
                 out.extend(batch)
         return out
 
@@ -111,6 +111,41 @@ def _extract_response_list(payload: Any) -> list[Mapping[str, Any]]:
         if isinstance(lst, list):
             return lst
     return []
+
+
+def _extract_total_pages(payload: Any) -> int | None:
+    if not isinstance(payload, Mapping):
+        return None
+    paging = payload.get("paging")
+    if not isinstance(paging, Mapping):
+        return None
+    total = paging.get("total")
+    try:
+        if total is None:
+            return None
+        total_int = int(total)
+        return total_int if total_int > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _has_page_error(payload: Any) -> bool:
+    if not isinstance(payload, Mapping):
+        return False
+    errors = payload.get("errors")
+    if isinstance(errors, Mapping):
+        for key, value in errors.items():
+            if str(key).lower() == "page":
+                # Treat any non-empty error message/list as a signal to stop paging
+                if isinstance(value, str):
+                    return bool(value.strip())
+                if isinstance(value, Mapping):
+                    return bool(value)
+                if isinstance(value, list):
+                    return bool(value)
+                if value is not None:
+                    return True
+    return False
 
 
 def _map_fixture(item: Mapping[str, Any]) -> Fixture:
