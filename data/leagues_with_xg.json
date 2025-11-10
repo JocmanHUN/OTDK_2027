@@ -1,0 +1,240 @@
+{
+  "generated_at_utc": "2025-11-10T17:18:42.052590+00:00",
+  "min_fixture_checks": 3,
+  "min_xg_hits": 3,
+  "max_probe": 10,
+  "leagues": [
+    {
+      "league_id": 188,
+      "league_name": "A-League",
+      "country_name": "Australia",
+      "season_year": 2025,
+      "has_odds": true,
+      "has_stats": true
+    },
+    {
+      "league_id": 252,
+      "league_name": "Division Profesional - Clausura",
+      "country_name": "Paraguay",
+      "season_year": 2025,
+      "has_odds": true,
+      "has_stats": true
+    },
+    {
+      "league_id": 253,
+      "league_name": "Major League Soccer",
+      "country_name": "USA",
+      "season_year": 2025,
+      "has_odds": true,
+      "has_stats": true
+    },
+    {
+      "league_id": 128,
+      "league_name": "Liga Profesional Argentina",
+      "country_name": "Argentina",
+      "season_year": 2025,
+      "has_odds": true,
+      "has_stats": true
+    },
+    {
+      "league_id": 169,
+      "league_name": "Super League",
+      "country_name": "China",
+      "season_year": 2025,
+      "has_odds": true,
+      "has_stats": true
+    },
+    {
+      "league_id": 103,
+      "league_name": "Eliteserien",
+      "country_name": "Norway",
+      "season_year": 2025,
+      "has_odds": true,
+      "has_stats": true
+    },
+    {
+      "league_id": 244,
+      "league_name": "Veikkausliiga",
+      "country_name": "Finland",
+      "season_year": 2025,
+      "has_odds": true,
+      "has_stats": true
+    },
+    {
+      "league_id": 71,
+      "league_name": "Serie A",
+      "country_name": "Brazil",
+      "season_year": 2025,
+      "has_odds": true,
+      "has_stats": true
+    },
+    {
+      "league_id": 344,
+      "league_name": "Primera División",
+      "country_name": "Bolivia",
+      "season_year": 2025,
+      "has_odds": true,
+      "has_stats": true
+    },
+    {
+      "league_id": 135,
+      "league_name": "Serie A",
+      "country_name": "Italy",
+      "season_year": 2025,
+      "has_odds": true,
+      "has_stats": true
+    },
+    {
+      "league_id": 39,
+      "league_name": "Premier League",
+      "country_name": "England",
+      "season_year": 2025,
+      "has_odds": true,
+      "has_stats": true
+    },
+    {
+      "league_id": 119,
+      "league_name": "Superliga",
+      "country_name": "Denmark",
+      "season_year": 2025,
+      "has_odds": true,
+      "has_stats": true
+    },
+    {
+      "league_id": 88,
+      "league_name": "Eredivisie",
+      "country_name": "Netherlands",
+      "season_year": 2025,
+      "has_odds": true,
+      "has_stats": true
+    },
+    {
+      "league_id": 207,
+      "league_name": "Super League",
+      "country_name": "Switzerland",
+      "season_year": 2025,
+      "has_odds": true,
+      "has_stats": true
+    },
+    {
+      "league_id": 144,
+      "league_name": "Jupiler Pro League",
+      "country_name": "Belgium",
+      "season_year": 2025,
+      "has_odds": true,
+      "has_stats": true
+    },
+    {
+      "league_id": 179,
+      "league_name": "Premiership",
+      "country_name": "Scotland",
+      "season_year": 2025,
+      "has_odds": true,
+      "has_stats": true
+    },
+    {
+      "league_id": 2,
+      "league_name": "UEFA Champions League",
+      "country_name": "World",
+      "season_year": 2025,
+      "has_odds": true,
+      "has_stats": true
+    },
+    {
+      "league_id": 848,
+      "league_name": "UEFA Europa Conference League",
+      "country_name": "World",
+      "season_year": 2025,
+      "has_odds": true,
+      "has_stats": true
+    },
+    {
+      "league_id": 3,
+      "league_name": "UEFA Europa League",
+      "country_name": "World",
+      "season_year": 2025,
+      "has_odds": true,
+      "has_stats": true
+    },
+    {
+      "league_id": 40,
+      "league_name": "Championship",
+      "country_name": "England",
+      "season_year": 2025,
+      "has_odds": true,
+      "has_stats": true
+    },
+    {
+      "league_id": 61,
+      "league_name": "Ligue 1",
+      "country_name": "France",
+      "season_year": 2025,
+      "has_odds": true,
+      "has_stats": true
+    },
+    {
+      "league_id": 78,
+      "league_name": "Bundesliga",
+      "country_name": "Germany",
+      "season_year": 2025,
+      "has_odds": true,
+      "has_stats": true
+    },
+    {
+      "league_id": 79,
+      "league_name": "2. Bundesliga",
+      "country_name": "Germany",
+      "season_year": 2025,
+      "has_odds": true,
+      "has_stats": true
+    },
+    {
+      "league_id": 218,
+      "league_name": "Bundesliga",
+      "country_name": "Austria",
+      "season_year": 2025,
+      "has_odds": true,
+      "has_stats": true
+    },
+    {
+      "league_id": 140,
+      "league_name": "La Liga",
+      "country_name": "Spain",
+      "season_year": 2025,
+      "has_odds": true,
+      "has_stats": true
+    },
+    {
+      "league_id": 141,
+      "league_name": "Segunda División",
+      "country_name": "Spain",
+      "season_year": 2025,
+      "has_odds": true,
+      "has_stats": true
+    },
+    {
+      "league_id": 203,
+      "league_name": "Süper Lig",
+      "country_name": "Turkey",
+      "season_year": 2025,
+      "has_odds": true,
+      "has_stats": true
+    },
+    {
+      "league_id": 94,
+      "league_name": "Primeira Liga",
+      "country_name": "Portugal",
+      "season_year": 2025,
+      "has_odds": true,
+      "has_stats": true
+    },
+    {
+      "league_id": 307,
+      "league_name": "Pro League",
+      "country_name": "Saudi-Arabia",
+      "season_year": 2025,
+      "has_odds": true,
+      "has_stats": true
+    }
+  ]
+}

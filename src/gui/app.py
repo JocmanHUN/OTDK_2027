@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import time
@@ -38,6 +39,49 @@ from src.repositories.sqlite.predictions_sqlite import PredictionsRepoSqlite
 BASE_DIR = Path(__file__).resolve().parents[2]
 DB_PATH = str(BASE_DIR / "data" / "app.db")
 MIGRATION_FILE = str(BASE_DIR / "migrations" / "V1__base.sql")
+XG_LEAGUES_FILE = BASE_DIR / "data" / "leagues_with_xg.json"
+
+
+def _maybe_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _load_xg_leagues() -> List[Mapping[str, Any]]:
+    """Return leagues prefiltered for xG coverage, if the generated file exists."""
+
+    try:
+        with open(XG_LEAGUES_FILE, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except FileNotFoundError:
+        return []
+    except Exception as exc:
+        print(f"[GUI] Figyelmeztetés: nem sikerült beolvasni az xG ligalistát: {exc}")
+        return []
+
+    leagues = payload.get("leagues")
+    if not isinstance(leagues, list):
+        return []
+
+    cleaned: List[Mapping[str, Any]] = []
+    for row in leagues:
+        if not isinstance(row, Mapping):
+            continue
+        league_id = _maybe_int(row.get("league_id"))
+        season_year = _maybe_int(row.get("season_year"))
+        if league_id is None or season_year is None:
+            continue
+        cleaned.append(
+            {
+                "league_id": league_id,
+                "league_name": row.get("league_name"),
+                "country_name": row.get("country_name"),
+                "season_year": season_year,
+            }
+        )
+    return cleaned
 
 
 # ---------------------------- UI helpers ----------------------------
@@ -133,7 +177,7 @@ def _tomorrow_budapest_date_str() -> str:
 
 
 def _select_fixtures_for_tomorrow() -> List[Mapping[str, Any]]:
-    leagues = LeaguesService().get_current_leagues()
+    leagues = _load_xg_leagues() or LeaguesService().get_current_leagues()
     fx_svc = FixturesService()
     odds_svc = OddsService()
     day = _tomorrow_budapest_date_str()

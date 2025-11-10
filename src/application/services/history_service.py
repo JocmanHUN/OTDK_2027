@@ -391,6 +391,7 @@ class HistoryService:
             away = teams.get("away") or {}
             out.append(
                 {
+                    "fixture_id": _safe_int(fx.get("id")),
                     "date_utc": dt,
                     "home_id": _safe_int(home.get("id")),
                     "away_id": _safe_int(away.get("id")),
