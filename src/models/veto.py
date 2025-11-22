@@ -54,19 +54,18 @@ def _form_distribution(rows: list[dict], decay_factor: float) -> tuple[float, fl
 
 @dataclass
 class VetoModel(BasePredictiveModel):
-    """Asymmetric form combiner with product and weighted-average components.
+    """Asymmetric Veto modell a megadott képlet szerint.
 
-    Parameters
-    - `history`: provider with `get_recent_team_stats(...)` (DI for testing).
-    - `last_n`: number of recent matches to consider (<=0 yields uniform via empty history).
-    - `decay_factor`: exponential decay per step back in time, clamped to [0,1]; 0 treated as 1.
-    - `mul_weight`: weight in [0,1] between product and average; 1=product-only, 0=average-only.
+    Paraméterek
+    - `history`: adatforrás `get_recent_team_stats(...)` metódussal (teszteléshez cserélhető).
+    - `last_n`: legfeljebb ennyi legutóbbi meccs számít (<=0 → üres történelem).
+    - `decay_factor`: exponenciális súly a múltra, [0,1] közé szorítva, 0 pedig 1-nek számít.
 
-    Raw components
-    - 1: hW * aL, avg(hW, aL)
-    - X: hD * aD, avg(hD, aD)
-    - 2: aW * hL, avg(aW, hL)
-    Final raw score = mul_weight * product + (1 - mul_weight) * average.
+    Kombináció
+    - P(1) = P_H(win) * (1 - P_A(win))
+    - P(2) = P_A(win) * (1 - P_H(win))
+    - P(X) = (P_H(draw) * n_H + P_A(draw) * n_A) / (n_H + n_A)
+    Végül normalizáljuk a P(1), P(X), P(2) hármast (belsőleg 0-1 tartományban tartva).
     """
 
     name: ClassVar[ModelName] = ModelName.VETO
@@ -75,7 +74,6 @@ class VetoModel(BasePredictiveModel):
     history: _HistoryProto | None = None
     last_n: int = 10
     decay_factor: float = 0.85
-    mul_weight: float = 0.6  # emphasis on the veto-like multiplicative agreement
 
     def predict(self, match: Match, ctx: ModelContext) -> Prediction:
         if ctx.home_team_id is None or ctx.away_team_id is None:
@@ -107,28 +105,26 @@ class VetoModel(BasePredictiveModel):
             int(ctx.away_team_id), int(ctx.league_id), int(ctx.season), self.last_n
         )
 
-        hW, hD, hL = _form_distribution(home_rows, self.decay_factor)
-        aW, aD, aL = _form_distribution(away_rows, self.decay_factor)
+        hW, hD, _ = _form_distribution(home_rows, self.decay_factor)
+        aW, aD, _ = _form_distribution(away_rows, self.decay_factor)
 
-        w = max(0.0, min(1.0, float(self.mul_weight)))
+        n_home = len(home_rows)
+        n_away = len(away_rows)
+        n_total = n_home + n_away
 
-        p1_prod = hW * aL
-        p1_avg = 0.5 * (hW + aL)
-        p1 = w * p1_prod + (1.0 - w) * p1_avg
+        p1_raw = hW * (1.0 - aW)
+        p2_raw = aW * (1.0 - hW)
 
-        px_prod = hD * aD
-        px_avg = 0.5 * (hD + aD)
-        px = w * px_prod + (1.0 - w) * px_avg
+        if n_total > 0:
+            px_raw = (hD * n_home + aD * n_away) / n_total
+        else:
+            px_raw = 1.0 / 3.0  # nincs adat, maradjon semleges
 
-        p2_prod = aW * hL
-        p2_avg = 0.5 * (aW + hL)
-        p2 = w * p2_prod + (1.0 - w) * p2_avg
-
-        s = p1 + px + p2
+        s = p1_raw + px_raw + p2_raw
         if s <= 0.0:
             probs = ProbabilityTriplet(home=1 / 3, draw=1 / 3, away=1 / 3)
         else:
-            probs = ProbabilityTriplet(home=p1 / s, draw=px / s, away=p2 / s)
+            probs = ProbabilityTriplet(home=p1_raw / s, draw=px_raw / s, away=p2_raw / s)
 
         return Prediction(
             fixture_id=match.fixture_id,

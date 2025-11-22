@@ -104,9 +104,9 @@ def test_balance_model_exact_combination() -> None:
 
     hW, hD, hL = _form_distribution(_rows_from_results(home_seq)[:last_n], df)
     aW, aD, aL = _form_distribution(_rows_from_results(away_seq)[:last_n], df)
-    exp_1 = 0.5 * (hW + aL)
+    exp_1 = 0.5 * (hW + (1 - aW))
     exp_X = 0.5 * (hD + aD)
-    exp_2 = 0.5 * (aW + hL)
+    exp_2 = 0.5 * (aW + (1 - hW))
     norm = exp_1 + exp_X + exp_2
     exp_1, exp_X, exp_2 = exp_1 / norm, exp_X / norm, exp_2 / norm
 

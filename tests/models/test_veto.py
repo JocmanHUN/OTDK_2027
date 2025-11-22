@@ -88,27 +88,32 @@ class _HistFake:
         return seq[:last]
 
 
-def test_veto_model_mixture_vs_average_and_product() -> None:
+def test_veto_model_matches_spec_combination() -> None:
     home_seq = ["W", "D", "W", "L", "D"]
     away_seq = ["L", "D", "L", "W", "D"]
     df = 0.7
     last_n = 5
-    w = 0.6
     hist = _HistFake(
         {
             10: _rows_from_results(home_seq),
             20: _rows_from_results(away_seq),
         }
     )
-    model = VetoModel(history=hist, last_n=last_n, decay_factor=df, mul_weight=w)
+    model = VetoModel(history=hist, last_n=last_n, decay_factor=df)
     match, ctx = _mk_match_ctx(home_id=10, away_id=20)
 
-    hW, hD, hL = _form_distribution(_rows_from_results(home_seq)[:last_n], df)
-    aW, aD, aL = _form_distribution(_rows_from_results(away_seq)[:last_n], df)
+    home_rows = _rows_from_results(home_seq)[:last_n]
+    away_rows = _rows_from_results(away_seq)[:last_n]
 
-    p1 = w * (hW * aL) + (1 - w) * 0.5 * (hW + aL)
-    pX = w * (hD * aD) + (1 - w) * 0.5 * (hD + aD)
-    p2 = w * (aW * hL) + (1 - w) * 0.5 * (aW + hL)
+    hW, hD, _ = _form_distribution(home_rows, df)
+    aW, aD, _ = _form_distribution(away_rows, df)
+
+    n_home = len(home_rows)
+    n_away = len(away_rows)
+
+    p1 = hW * (1 - aW)
+    p2 = aW * (1 - hW)
+    pX = (hD * n_home + aD * n_away) / (n_home + n_away)
     norm = p1 + pX + p2
     exp_1, exp_X, exp_2 = p1 / norm, pX / norm, p2 / norm
 

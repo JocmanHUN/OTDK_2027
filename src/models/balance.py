@@ -59,18 +59,18 @@ def _form_distribution(rows: list[dict], decay_factor: float) -> tuple[float, fl
 
 @dataclass
 class BalanceModel(BasePredictiveModel):
-    """Symmetric form-based model using exponential weighting over last N matches.
+    """Szimmetrikus Balance modell a megadott átlagoló képlettel.
 
-    Parameters
-    - `history`: provider with `get_recent_team_stats(...)` (DI for testing).
-    - `last_n`: number of recent matches to consider (<=0 yields uniform via empty history).
-    - `decay_factor`: exponential decay per step back in time, clamped to [0,1]; 0 treated as 1.
+    Paraméterek
+    - `history`: provider with `get_recent_team_stats(...)` (tesztfüggő DI).
+    - `last_n`: legutóbbi vizsgált meccsek száma (<=0 → üres történelem).
+    - `decay_factor`: exponenciális súly 0 és 1 között (0 → 1).
 
-    Combination
-    - 1: mean(home.W, away.L)
-    - X: mean(home.D, away.D)
-    - 2: mean(away.W, home.L)
-    - Normalized to sum to 1.
+    Kombináció
+    - P(1) = 0.5 * (P_H(win) + (1 - P_A(win)))
+    - P(2) = 0.5 * (P_A(win) + (1 - P_H(win)))
+    - P(X) = 0.5 * (P_H(draw) + P_A(draw))
+    A végeredményt 0-1 közé normalizáljuk (belsőleg, nem %-ban).
     """
 
     name: ClassVar[ModelName] = ModelName.BALANCE
@@ -114,16 +114,16 @@ class BalanceModel(BasePredictiveModel):
         hW, hD, hL = _form_distribution(home_rows, self.decay_factor)
         aW, aD, aL = _form_distribution(away_rows, self.decay_factor)
 
-        p1 = 0.5 * (hW + aL)
-        px = 0.5 * (hD + aD)
-        p2 = 0.5 * (aW + hL)
+        p1_raw = 0.5 * (hW + (1.0 - aW))
+        p2_raw = 0.5 * (aW + (1.0 - hW))
+        px_raw = 0.5 * (hD + aD)
 
         # Normalize for numerical safety
-        s = p1 + px + p2
+        s = p1_raw + px_raw + p2_raw
         if s <= 0.0:
             probs = ProbabilityTriplet(home=1 / 3, draw=1 / 3, away=1 / 3)
         else:
-            probs = ProbabilityTriplet(home=p1 / s, draw=px / s, away=p2 / s)
+            probs = ProbabilityTriplet(home=p1_raw / s, draw=px_raw / s, away=p2_raw / s)
 
         return Prediction(
             fixture_id=match.fixture_id,
