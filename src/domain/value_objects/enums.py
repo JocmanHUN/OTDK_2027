@@ -21,6 +21,12 @@ class ModelName(str, Enum):
     LOGISTIC_REGRESSION = "logistic_regression"
     VETO = "veto"
     BALANCE = "balance"
+    VETO_LUCK = "veto_luck"
+    BALANCE_LUCK = "balance_luck"
+    VETO_BLEND = "veto_blend"
+    BALANCE_BLEND = "balance_blend"
+    VETO_SHIFT = "veto_shift"
+    BALANCE_SHIFT = "balance_shift"
 
 
 class StrategyName(str, Enum):

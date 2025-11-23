@@ -746,7 +746,13 @@ MODEL_HEADERS = {
     "elo": "Elo",
     "logistic_regression": "LogReg",
     "balance": "Balance",
+    "balance_blend": "BalanceBlend",
+    "balance_luck": "BalanceLuck",
+    "balance_shift": "BalanceShift",
     "veto": "Veto",
+    "veto_blend": "VetoBlend",
+    "veto_luck": "VetoLuck",
+    "veto_shift": "VetoShift",
 }
 
 

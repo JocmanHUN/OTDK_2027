@@ -240,6 +240,7 @@ class HistoryService:
 
                 stats = self.get_fixture_statistics(int(f_id)) if f_id else {}
                 team_stats = stats.get(int(team_id)) or {}
+                opp_stats = stats.get(int(opponent_id)) or {}
 
                 collected.append(
                     {
@@ -249,6 +250,8 @@ class HistoryService:
                         "opponent_id": opponent_id,
                         "goals_for": gf,
                         "goals_against": ga,
+                        "xg_for": _extract_xg(team_stats),
+                        "xg_against": _extract_xg(opp_stats),
                         # Stats for the requested team
                         "stats": team_stats,
                         # All teams' stats in this fixture {team_id: {stat: value}}
@@ -612,3 +615,16 @@ def _normalize_stat_value(value: Any) -> Optional[float]:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _extract_xg(stats: Mapping[str, Any] | None) -> Optional[float]:
+    if not stats:
+        return None
+    for name, value in stats.items():
+        name_lc = str(name).lower()
+        if "xg" in name_lc or ("expected" in name_lc and "goal" in name_lc):
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+    return None
