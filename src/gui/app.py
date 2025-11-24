@@ -771,6 +771,8 @@ class AppState:
     bm_combo: ttk.Combobox | None = None
     model_combo_var: tk.StringVar | None = None
     model_combo: ttk.Combobox | None = None
+    model_visibility: Dict[str, bool] | None = None
+    model_visibility_vars: Dict[str, tk.BooleanVar] | None = None
     search_var: tk.StringVar | None = None
     sort_by: int | None = None
     sort_reverse: bool = False
@@ -940,38 +942,43 @@ def _best_label_and_pct(
     return lbl, v * 100.0
 
 
-def refresh_table(state: AppState) -> None:
+def refresh_table(state: AppState, *, allow_network: bool = True) -> None:
     for i in state.tree.get_children():
         state.tree.delete(i)
 
     # Update missing results and reconcile statuses before loading rows
+    if allow_network:
+        try:
+            _update_missing_results(state.conn)
+        except Exception:
+            pass
     try:
-        _update_missing_results(state.conn)
         _reconcile_prediction_statuses(state.conn)
     except Exception:
         pass
     # Opportunistic retry: for upcoming view, attempt to process fixtures not yet persisted
-    try:
-        if not getattr(state, "show_played", False):
-            global _LAST_RETRY_PRED_AT
-            import time as _t
+    if allow_network:
+        try:
+            if not getattr(state, "show_played", False):
+                global _LAST_RETRY_PRED_AT
+                import time as _t
 
-            last = _LAST_RETRY_PRED_AT
-            # Retry at most every 300s
-            if last is None or (_t.time() - float(last)) > 300.0:
-                try:
-                    write_conn = _ensure_db()
-                except Exception:
-                    write_conn = state.conn
-                fixtures = _select_fixtures_for_tomorrow()
-                for r in fixtures:
+                last = _LAST_RETRY_PRED_AT
+                # Retry at most every 300s
+                if last is None or (_t.time() - float(last)) > 300.0:
                     try:
-                        _predict_then_persist_if_complete(write_conn, r)
+                        write_conn = _ensure_db()
                     except Exception:
-                        pass
-                _LAST_RETRY_PRED_AT = _t.time()
-    except Exception:
-        pass
+                        write_conn = state.conn
+                    fixtures = _select_fixtures_for_tomorrow()
+                    for r in fixtures:
+                        try:
+                            _predict_then_persist_if_complete(write_conn, r)
+                        except Exception:
+                            pass
+                    _LAST_RETRY_PRED_AT = _t.time()
+        except Exception:
+            pass
     if getattr(state, "show_played", False):
         matches, preds_by_match = _read_played_from_db(state.conn, days=7)
     else:
@@ -1463,6 +1470,8 @@ def run_app() -> None:
     except Exception:
         pass
     state = AppState(conn=tmp_conn, tree=tree)
+    state.model_visibility = {k: True for k in MODEL_HEADERS.keys()}
+    state.model_visibility_vars = {k: tk.BooleanVar(value=True) for k in MODEL_HEADERS.keys()}
     # Build stats label grid
     try:
         labels = [
@@ -1513,6 +1522,66 @@ def run_app() -> None:
     entry.pack(side=tk.LEFT, padx=(0, 12))
     state.search_var = search_var
 
+    # Modell oszlop láthatóság kapcsolók
+    def _on_toggle_model_column(model_key: str) -> None:
+        try:
+            val = True
+            if state.model_visibility_vars and model_key in state.model_visibility_vars:
+                val = bool(state.model_visibility_vars[model_key].get())
+            if state.model_visibility is not None:
+                state.model_visibility[model_key] = val
+            _apply_displaycolumns()
+        except Exception:
+            pass
+
+    def _toggle_all_models(value: bool) -> None:
+        try:
+            if state.model_visibility is None:
+                state.model_visibility = {}
+            if state.model_visibility_vars is None:
+                state.model_visibility_vars = {}
+            for key in MODEL_HEADERS.keys():
+                state.model_visibility[key] = value
+                if key not in state.model_visibility_vars:
+                    state.model_visibility_vars[key] = tk.BooleanVar(value=value)
+                else:
+                    state.model_visibility_vars[key].set(value)
+            _apply_displaycolumns()
+        except Exception:
+            pass
+
+    def _show_columns_menu() -> None:
+        menu: tk.Menu | None = None
+        try:
+            menu = tk.Menu(btn_frame, tearoff=0)
+            menu.add_command(label="Összes bekapcsolása", command=lambda: _toggle_all_models(True))
+            menu.add_command(label="Összes kikapcsolása", command=lambda: _toggle_all_models(False))
+            menu.add_separator()
+            for key, label in MODEL_HEADERS.items():
+                if state.model_visibility_vars is None:
+                    state.model_visibility_vars = {}
+                var = state.model_visibility_vars.get(key)
+                if var is None:
+                    var = tk.BooleanVar(value=True)
+                    state.model_visibility_vars[key] = var
+                menu.add_checkbutton(
+                    label=label, variable=var, command=partial(_on_toggle_model_column, key)
+                )
+            menu.tk_popup(
+                columns_btn.winfo_rootx(), columns_btn.winfo_rooty() + columns_btn.winfo_height()
+            )
+        except Exception:
+            pass
+        finally:
+            try:
+                if menu is not None:
+                    menu.grab_release()
+            except Exception:
+                pass
+
+    columns_btn = ttk.Button(btn_frame, text="Oszlopok", command=_show_columns_menu)
+    columns_btn.pack(side=tk.LEFT, padx=(0, 12))
+
     # Toggle button for played/upcoming view
     state.show_played = False
 
@@ -1535,7 +1604,7 @@ def run_app() -> None:
             except Exception:
                 pass
             _update_played_btn_label()
-            refresh_table(state)
+            refresh_table(state, allow_network=False)
         except Exception:
             pass
 
@@ -1553,7 +1622,7 @@ def run_app() -> None:
     def _on_winners_toggle() -> None:
         try:
             state.winners_only = bool(winners_var.get())
-            refresh_table(state)
+            refresh_table(state, allow_network=False)
         except Exception:
             pass
 
@@ -1590,7 +1659,7 @@ def run_app() -> None:
             pass
 
     def _on_search_change(*_args: Any) -> None:
-        refresh_table(state)
+        refresh_table(state, allow_network=False)
 
     search_var.trace_add("write", _on_search_change)
 
@@ -1647,8 +1716,15 @@ def run_app() -> None:
                 display.append(result_col)
             has_model = state.selected_model_key is not None
             has_bookmaker = state.selected_bookmaker_id is not None
+            try:
+                vis_map = state.model_visibility or {}
+                visible_model_headers = [
+                    lbl for key, lbl in MODEL_HEADERS.items() if vis_map.get(key, True)
+                ]
+            except Exception:
+                visible_model_headers = list(MODEL_HEADERS.values())
             if not has_model:
-                display += list(MODEL_HEADERS.values())
+                display += visible_model_headers
             else:
                 # mypy: selected_model_key is not None here, but not narrowed; cast to str
                 model_key = cast(str, state.selected_model_key)
@@ -1656,7 +1732,7 @@ def run_app() -> None:
                 if disp:
                     display.append(disp)
                 else:
-                    display += list(MODEL_HEADERS.values())
+                    display += visible_model_headers
                 # When a single model is selected, show the tip-odds column and EV
                 if "BEST_ODDS_COL" in locals():
                     display.append(BEST_ODDS_COL)
@@ -1681,7 +1757,7 @@ def run_app() -> None:
                     state.selected_bookmaker_id = rev.get(sel)
             _apply_displaycolumns()
             _update_odds_headers()
-            refresh_table(state)
+            refresh_table(state, allow_network=False)
         except Exception:
             pass
 
@@ -1708,7 +1784,7 @@ def run_app() -> None:
                 _update_winners_filter_visibility()
             except Exception:
                 pass
-            refresh_table(state)
+            refresh_table(state, allow_network=False)
         except Exception:
             pass
 
