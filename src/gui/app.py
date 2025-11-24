@@ -766,6 +766,8 @@ class AppState:
     tree: ttk.Treeview
     selected_bookmaker_id: int | None = None
     selected_model_key: str | None = None
+    bankroll_var: tk.StringVar | None = None
+    bankroll_amount: float | None = None
     bm_names_by_id: Dict[int, str] | None = None
     bm_combo_var: tk.StringVar | None = None
     bm_combo: ttk.Combobox | None = None
@@ -942,6 +944,26 @@ def _best_label_and_pct(
     return lbl, v * 100.0
 
 
+def _kelly_stakes(bankroll: float, prob: float, odds: float) -> tuple[float, float, float] | None:
+    """Return full/half/quarter Kelly stakes for a single outcome, or None if not positive EV."""
+    try:
+        bankroll_f = float(bankroll)
+        if bankroll_f <= 0.0:
+            return None
+        p = float(prob)
+        b = float(odds) - 1.0
+        if b <= 0.0:
+            return None
+        q = 1.0 - p
+        f = (b * p - q) / b
+        if f <= 0.0:
+            return None
+        stake = bankroll_f * f
+        return (stake, stake * 0.5, stake * 0.25)
+    except Exception:
+        return None
+
+
 def refresh_table(state: AppState, *, allow_network: bool = True) -> None:
     for i in state.tree.get_children():
         state.tree.delete(i)
@@ -1095,6 +1117,8 @@ def refresh_table(state: AppState, *, allow_network: bool = True) -> None:
         ev_cell = ""
         if state.selected_model_key is not None:
             best_text = ""
+            ev_value: float | None = None
+            kelly_full = kelly_half = kelly_quarter = None
             try:
                 trip_sel = model_map.get(state.selected_model_key)
                 if trip_sel:
@@ -1112,7 +1136,13 @@ def refresh_table(state: AppState, *, allow_network: bool = True) -> None:
                         # Compute expected value for selected bookmaker and model tip
                         p = ph if sel_lbl == "1" else (pd if sel_lbl == "X" else pa)
                         ev = p * (odd_val) - 1.0
-                        ev_cell = f"{ev*100:+.0f}%"
+                        ev_pct = ev * 100.0
+                        ev_value = ev
+                        if state.bankroll_amount is not None:
+                            ks = _kelly_stakes(state.bankroll_amount, p, odd_val)
+                            if ks is not None:
+                                kelly_full, kelly_half, kelly_quarter = ks
+                        ev_cell = f"{ev_pct:+.0f}%"
                     else:
                         # Otherwise compute and show best across bookmakers for the tip
                         best: Dict[str, Tuple[int, float]] = {}
@@ -1139,12 +1169,33 @@ def refresh_table(state: AppState, *, allow_network: bool = True) -> None:
                             # Compute BEST EV when no bookmaker selected
                             p = ph if sel_lbl == "1" else (pd if sel_lbl == "X" else pa)
                             ev = p * odd - 1.0
-                            ev_cell = f"{ev*100:+.0f}%"
+                            ev_pct = ev * 100.0
+                            ev_value = ev
+                            if state.bankroll_amount is not None:
+                                ks = _kelly_stakes(state.bankroll_amount, p, odd)
+                                if ks is not None:
+                                    kelly_full, kelly_half, kelly_quarter = ks
+                            ev_cell = f"{ev_pct:+.0f}%"
             except Exception:
                 best_text = ""
             values.append(best_text)
             # Append EV cell right after the tip-odds column
             values.append(ev_cell)
+
+            # Kelly stakes columns (stake + expected profit) only if positive EV and bankroll provided
+            def _kelly_disp(stake: float | None, ev_val: float | None) -> str:
+                try:
+                    if stake is None or ev_val is None or ev_val <= 0.0:
+                        return "-"
+                    expected_profit = stake * ev_val
+                    return f"{stake:.0f} (EV+{expected_profit:.0f})"
+                except Exception:
+                    return "-"
+
+            if state.bankroll_amount is not None:
+                values.append(_kelly_disp(kelly_full, ev_value))
+                values.append(_kelly_disp(kelly_half, ev_value))
+                values.append(_kelly_disp(kelly_quarter, ev_value))
         # If BEST_ODDS_COL exists but no single model selected, pad empty cells to keep columns aligned
         try:
             if state.selected_model_key is None:
@@ -1154,6 +1205,14 @@ def refresh_table(state: AppState, *, allow_network: bool = True) -> None:
                 # EV column placeholder
                 if any(c == "EV" for c in cols_tuple):
                     values.append("")
+                # Kelly column placeholders (only if bankroll set)
+                if state.bankroll_amount is not None:
+                    if any(c == "Kelly" for c in cols_tuple):
+                        values.append("")
+                    if any(c == "Kelly 1/2" for c in cols_tuple):
+                        values.append("")
+                    if any(c == "Kelly 1/4" for c in cols_tuple):
+                        values.append("")
         except Exception:
             pass
         # Append detailed odds columns only when bookmaker is selected AND no specific model is selected
@@ -1331,9 +1390,21 @@ def run_app() -> None:
     # Extend columns with odds-shopping column
     BEST_ODDS_COL = "Best odds"
     EV_COL = "EV"
+    KELLY_COL = "Kelly"
+    KELLY_HALF_COL = "Kelly 1/2"
+    KELLY_Q_COL = "Kelly 1/4"
     try:
         if BEST_ODDS_COL not in columns_all:
-            columns_all = columns_base + [BEST_ODDS_COL, EV_COL, "H odds", "D odds", "V odds"]
+            columns_all = columns_base + [
+                BEST_ODDS_COL,
+                EV_COL,
+                KELLY_COL,
+                KELLY_HALF_COL,
+                KELLY_Q_COL,
+                "H odds",
+                "D odds",
+                "V odds",
+            ]
             tree.configure(columns=columns_all)
     except Exception:
         # Safe fallback if reconfiguration fails
@@ -1414,6 +1485,8 @@ def run_app() -> None:
             width = 120
         elif col == EV_COL:
             width = 70
+        elif col in (KELLY_COL, KELLY_HALF_COL, KELLY_Q_COL):
+            width = 130
         elif col in ("H odds", "D odds", "V odds"):
             width = 80
         else:
@@ -1514,6 +1587,14 @@ def run_app() -> None:
     model_combo.pack(side=tk.LEFT, padx=(0, 12))
     state.model_combo_var = model_var
     state.model_combo = model_combo
+    state.bankroll_amount = None
+
+    # Bankroll input for Kelly stake suggestion
+    ttk.Label(btn_frame, text="Bankroll:").pack(side=tk.LEFT, padx=(0, 6))
+    bankroll_var = tk.StringVar(value="")
+    bankroll_entry = ttk.Entry(btn_frame, textvariable=bankroll_var, width=12)
+    bankroll_entry.pack(side=tk.LEFT, padx=(0, 12))
+    state.bankroll_var = bankroll_var
 
     # Free-text search for team names
     ttk.Label(btn_frame, text="Keres\u00e9s:").pack(side=tk.LEFT, padx=(0, 6))
@@ -1658,6 +1739,23 @@ def run_app() -> None:
         except Exception:
             pass
 
+    def _on_bankroll_change(*_args: Any) -> None:
+        try:
+            raw = state.bankroll_var.get() if state.bankroll_var is not None else ""
+            raw = raw.replace(",", ".") if isinstance(raw, str) else ""
+            val = float(raw) if raw else None
+            state.bankroll_amount = val if val is not None and val > 0 else None
+        except Exception:
+            state.bankroll_amount = None
+        try:
+            _apply_displaycolumns()
+        except Exception:
+            pass
+        refresh_table(state, allow_network=False)
+
+    if state.bankroll_var is not None:
+        state.bankroll_var.trace_add("write", _on_bankroll_change)
+
     def _on_search_change(*_args: Any) -> None:
         refresh_table(state, allow_network=False)
 
@@ -1738,6 +1836,13 @@ def run_app() -> None:
                     display.append(BEST_ODDS_COL)
                 if "EV_COL" in locals():
                     display.append(EV_COL)
+                if state.bankroll_amount is not None:
+                    if "KELLY_COL" in locals():
+                        display.append(KELLY_COL)
+                    if "KELLY_HALF_COL" in locals():
+                        display.append(KELLY_HALF_COL)
+                    if "KELLY_Q_COL" in locals():
+                        display.append(KELLY_Q_COL)
             # Detailed odds (H/D/V) only if bookmaker selected and NO single model selected
             if has_bookmaker and not has_model:
                 display += ["H odds", "D odds", "V odds"]
