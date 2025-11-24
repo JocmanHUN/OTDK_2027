@@ -81,15 +81,15 @@ def _rows_have_xg(rows: list[dict]) -> bool:
 class BalanceLuckModel(BasePredictiveModel):
     """Balance model with xG-based luck adjustment (downweights lucky, upweights unlucky)."""
 
-    name: ClassVar[ModelName] = ModelName.BALANCE_LUCK
+    name: ClassVar[ModelName] = ModelName.BALANCE_LUCK_MEDIUM
     version: ClassVar[str] = "2-luck"
 
     history: _HistoryProto | None = None
     last_n: int = 10
     decay_factor: float = 0.85
-    luck_strength: float = 0.5
-    luck_threshold: float = 0.7
-    variant: str = "medium"
+    luck_strength: float = 0.5  # medium
+    luck_threshold: float = 0.7  # medium
+    variant: str = "medium"  # used for version tag
 
     def predict(self, match: Match, ctx: ModelContext) -> Prediction:
         if ctx.home_team_id is None or ctx.away_team_id is None:
@@ -157,3 +157,23 @@ class BalanceLuckModel(BasePredictiveModel):
             version=f"{self.version}-{self.variant}",
             status=PredictionStatus.OK,
         )
+
+
+@dataclass
+class BalanceLuckLowModel(BalanceLuckModel):
+    """Balance luck with light adjustment."""
+
+    name: ClassVar[ModelName] = ModelName.BALANCE_LUCK_LOW
+    luck_strength: float = 0.25
+    luck_threshold: float = 0.9
+    variant: str = "low"
+
+
+@dataclass
+class BalanceLuckHighModel(BalanceLuckModel):
+    """Balance luck with strong adjustment."""
+
+    name: ClassVar[ModelName] = ModelName.BALANCE_LUCK_HIGH
+    luck_strength: float = 0.75
+    luck_threshold: float = 0.5
+    variant: str = "high"

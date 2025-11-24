@@ -7,7 +7,7 @@ from src.domain.interfaces.modeling import BasePredictiveModel
 
 from .balance import BalanceModel
 from .balance_blend import BalanceBlendModel
-from .balance_luck import BalanceLuckModel
+from .balance_luck import BalanceLuckHighModel, BalanceLuckLowModel, BalanceLuckModel
 from .balance_shift import BalanceShiftModel
 from .elo import EloModel
 from .logistic_regression import LogisticRegressionModel
@@ -15,7 +15,7 @@ from .monte_carlo import MonteCarloModel
 from .poisson import PoissonModel
 from .veto import VetoModel
 from .veto_blend import VetoBlendModel
-from .veto_luck import VetoLuckModel
+from .veto_luck import VetoLuckHighModel, VetoLuckLowModel, VetoLuckModel
 from .veto_shift import VetoShiftModel
 
 
@@ -29,11 +29,15 @@ def default_models() -> List[BasePredictiveModel]:
         LogisticRegressionModel(),
         BalanceModel(history=history),
         BalanceBlendModel(history=history),
+        BalanceLuckLowModel(history=history),
         BalanceLuckModel(history=history),
+        BalanceLuckHighModel(history=history),
         BalanceShiftModel(history=history),
         VetoModel(history=history),
         VetoBlendModel(history=history),
+        VetoLuckLowModel(history=history),
         VetoLuckModel(history=history),
+        VetoLuckHighModel(history=history),
         VetoShiftModel(history=history),
     ]
 
@@ -43,30 +47,14 @@ def luck_variants(
 ) -> List[BasePredictiveModel]:
     """Convenience factory for low/medium/high luck variants without duplicating code."""
     history = history or HistoryService()
-    presets = [
-        ("low", 0.25, 0.9),
-        ("medium", 0.5, 0.7),
-        ("high", 0.75, 0.5),
+    return [
+        BalanceLuckLowModel(history=history),
+        BalanceLuckModel(history=history),
+        BalanceLuckHighModel(history=history),
+        VetoLuckLowModel(history=history),
+        VetoLuckModel(history=history),
+        VetoLuckHighModel(history=history),
     ]
-    models: List[BasePredictiveModel] = []
-    for tag, strength, threshold in presets:
-        models.append(
-            BalanceLuckModel(
-                history=history,
-                luck_strength=strength,
-                luck_threshold=threshold,
-                variant=tag,
-            )
-        )
-        models.append(
-            VetoLuckModel(
-                history=history,
-                luck_strength=strength,
-                luck_threshold=threshold,
-                variant=tag,
-            )
-        )
-    return models
 
 
 def blend_models(

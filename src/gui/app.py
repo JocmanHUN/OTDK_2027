@@ -747,11 +747,15 @@ MODEL_HEADERS = {
     "logistic_regression": "LogReg",
     "balance": "Balance",
     "balance_blend": "BalanceBlend",
-    "balance_luck": "BalanceLuck",
+    "balance_luck_low": "BalanceLuck-L",
+    "balance_luck_medium": "BalanceLuck-M",
+    "balance_luck_high": "BalanceLuck-H",
     "balance_shift": "BalanceShift",
     "veto": "Veto",
     "veto_blend": "VetoBlend",
-    "veto_luck": "VetoLuck",
+    "veto_luck_low": "VetoLuck-L",
+    "veto_luck_medium": "VetoLuck-M",
+    "veto_luck_high": "VetoLuck-H",
     "veto_shift": "VetoShift",
 }
 
