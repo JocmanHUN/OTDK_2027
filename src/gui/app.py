@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from functools import partial
 from pathlib import Path
 from tkinter import messagebox, ttk
-from typing import Any, Dict, List, Mapping, Tuple, cast
+from typing import Any, Dict, List, Literal, Mapping, Tuple, cast
 
 from src.application.services.fixtures_service import FixturesService
 from src.application.services.history_service import HistoryService
@@ -1315,42 +1315,466 @@ def _show_odds_window_db(conn: sqlite3.Connection, tree: ttk.Treeview, fixture_i
             if bid not in names:
                 b = brepo.get_by_id(bid)
                 names[bid] = b.name if b else str(bid)
+        match_row = conn.execute(
+            "SELECT home_team, away_team FROM matches WHERE match_id = ? LIMIT 1",
+            (int(fixture_id),),
+        ).fetchone()
+        cur = conn.execute(
+            """
+            SELECT model_name, prob_home, prob_draw, prob_away, predicted_result
+            FROM predictions
+            WHERE match_id = ?
+            """,
+            (int(fixture_id),),
+        )
+        prediction_rows = cur.fetchall()
     except Exception as exc:
         messagebox.showerror(
             "Hiba", f"Odds bet\u00f6lt\u00e9se az adatb\u00e1zisb\u00f3l sikertelen: {exc}"
         )
         return
 
-    top = tk.Toplevel(tree.winfo_toplevel())
-    top.title(f"Odds - {fixture_id}")
-    top.geometry("600x400")
+    match_label = None
     try:
-        top.title(f"Odds - {fixture_id}")
+        if match_row is not None:
+            h, a = match_row
+            if isinstance(h, str) and isinstance(a, str):
+                match_label = f"{h} - {a}"
+    except Exception:
+        match_label = None
+
+    # Manual-odds defaults: keep inputs empty; store best for fallback
+    default_home = default_draw = default_away = ""
+    best_triplet: tuple[float, float, float] | None = None
+    best_bm_triplet: Dict[str, str] | None = None
+    last_used_best = False
+    try:
+        best_h = best_d = best_a = None
+        best_bm_h = best_bm_d = best_bm_a = None
+        for o in odds_list:
+            oh, od, oa = float(o.home), float(o.draw), float(o.away)
+            best_h = max(best_h or oh, oh)
+            best_d = max(best_d or od, od)
+            best_a = max(best_a or oa, oa)
+            if best_h == oh:
+                best_bm_h = names.get(int(o.bookmaker_id), str(o.bookmaker_id))
+            if best_d == od:
+                best_bm_d = names.get(int(o.bookmaker_id), str(o.bookmaker_id))
+            if best_a == oa:
+                best_bm_a = names.get(int(o.bookmaker_id), str(o.bookmaker_id))
+        if best_h is not None and best_d is not None and best_a is not None:
+            best_triplet = (best_h, best_d, best_a)
+            best_bm_triplet = {
+                "1": best_bm_h or "",
+                "X": best_bm_d or "",
+                "2": best_bm_a or "",
+            }
     except Exception:
         pass
-    cols = ["Bookmaker", "Home", "Draw", "Away"]
-    tv = ttk.Treeview(top, columns=cols, show="headings")
-    for c in cols:
-        tv.heading(c, text=c)
-        tv.column(c, width=120 if c != "Bookmaker" else 200, anchor=tk.W)
-    vsb = ttk.Scrollbar(top, orient="vertical", command=tv.yview)
+
+    # Prepare model metadata
+    model_rows: list[dict[str, Any]] = []
+    for model_key, ph, pd, pa, pref in prediction_rows:
+        try:
+            model_label = MODEL_HEADERS.get(str(model_key), str(model_key))
+            model_rows.append(
+                {
+                    "key": str(model_key),
+                    "label": model_label,
+                    "p1": float(ph),
+                    "px": float(pd),
+                    "p2": float(pa),
+                    "pref": pref if isinstance(pref, str) else None,
+                }
+            )
+        except Exception:
+            continue
+
+    top = tk.Toplevel(tree.winfo_toplevel())
+    if match_label:
+        top.title(f"Odds - {fixture_id} - {match_label}")
+    else:
+        top.title(f"Odds - {fixture_id}")
+    top.geometry("900x520")
+    try:
+        if match_label:
+            top.title(f"Odds - {fixture_id} - {match_label}")
+        else:
+            top.title(f"Odds - {fixture_id}")
+    except Exception:
+        pass
+
+    top.grid_rowconfigure(1, weight=1)
+    top.grid_columnconfigure(0, weight=1)
+    top.grid_columnconfigure(1, weight=0)
+
+    controls = ttk.Frame(top)
+    controls.grid(row=0, column=0, columnspan=2, sticky="ew", padx=8, pady=6)
+    for i in range(9):
+        controls.grid_columnconfigure(i, weight=1)
+
+    if match_label:
+        ttk.Label(controls, text=match_label, font=("TkDefaultFont", 10, "bold")).grid(
+            row=0, column=0, columnspan=6, sticky="w", pady=(0, 2)
+        )
+
+    ttk.Label(controls, text="K\u00e9zi odds:").grid(row=1, column=0, sticky="w")
+    home_var = tk.StringVar(value=default_home)
+    draw_var = tk.StringVar(value=default_draw)
+    away_var = tk.StringVar(value=default_away)
+    ttk.Entry(controls, width=8, textvariable=home_var).grid(row=1, column=1, padx=2)
+    ttk.Entry(controls, width=8, textvariable=draw_var).grid(row=1, column=2, padx=2)
+    ttk.Entry(controls, width=8, textvariable=away_var).grid(row=1, column=3, padx=2)
+    clear_btn = ttk.Button(controls, text="Odds t\u00f6rl\u00e9se")
+    clear_btn.grid(row=1, column=4, padx=4, sticky="w")
+
+    model_var = tk.StringVar()
+    model_names = ["(Mind)"] + [r["label"] for r in model_rows]
+    model_var.set("(Mind)")
+    ttk.Label(controls, text="Modell:").grid(row=1, column=5, sticky="e")
+    model_combo = ttk.Combobox(
+        controls, width=14, textvariable=model_var, values=model_names, state="readonly"
+    )
+    model_combo.grid(row=1, column=6, sticky="w")
+
+    ttk.Label(controls, text="Bankroll:").grid(row=1, column=7, sticky="e")
+    bankroll_var = tk.StringVar(value="")
+    ttk.Entry(controls, width=10, textvariable=bankroll_var).grid(
+        row=1, column=8, sticky="w", padx=(2, 0)
+    )
+
+    btn_frame = ttk.Frame(top)
+    btn_frame.grid(row=2, column=0, columnspan=2, sticky="ew", padx=8, pady=6)
+    btn_frame.grid_columnconfigure(0, weight=1)
+    btn_frame.grid_columnconfigure(1, weight=1)
+
+    odds_cols = ["Bookmaker", "Home", "Draw", "Away"]
+    perf_cols = ["Modell", "Tipp", "Odds", "EV%", "P(1)%", "P(X)%", "P(2)%"]
+
+    tree_frame = ttk.Frame(top)
+    tree_frame.grid(row=1, column=0, sticky="nsew", padx=8, pady=4)
+    tree_frame.grid_rowconfigure(0, weight=1)
+    tree_frame.grid_columnconfigure(0, weight=1)
+    tv = ttk.Treeview(tree_frame, columns=odds_cols, show="headings")
+    vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=tv.yview)
     tv.configure(yscrollcommand=vsb.set)
+    # Color tags for EV highlighting in performance view
+    try:
+        tv.tag_configure("ev_pos", foreground="green")
+        tv.tag_configure("ev_neg", foreground="red")
+    except Exception:
+        pass
     tv.grid(row=0, column=0, sticky="nsew")
     vsb.grid(row=0, column=1, sticky="ns")
-    top.grid_rowconfigure(0, weight=1)
-    top.grid_columnconfigure(0, weight=1)
+
+    sidebar = ttk.LabelFrame(top, text="Legjobb tipp")
+    sidebar.grid(row=1, column=1, sticky="ns", padx=(0, 8), pady=4)
+    best_heading = tk.StringVar(value="Legjobb tipp EV")
+    best_vars: Dict[str, tk.StringVar] = {
+        "tip": tk.StringVar(value="-"),
+        "kelly_full": tk.StringVar(value="-"),
+        "kelly_half": tk.StringVar(value="-"),
+        "kelly_quarter": tk.StringVar(value="-"),
+    }
+    ttk.Label(sidebar, textvariable=best_heading).grid(
+        row=0, column=0, sticky="w", padx=6, pady=(6, 0)
+    )
+    ttk.Label(sidebar, textvariable=best_vars["tip"]).grid(row=1, column=0, sticky="w", padx=6)
+    ttk.Label(sidebar, text="Kelly (teljes)").grid(row=2, column=0, sticky="w", padx=6, pady=(6, 0))
+    ttk.Label(sidebar, textvariable=best_vars["kelly_full"]).grid(
+        row=3, column=0, sticky="w", padx=6
+    )
+    ttk.Label(sidebar, text="Kelly (f\u00e9l)").grid(
+        row=4, column=0, sticky="w", padx=6, pady=(6, 0)
+    )
+    ttk.Label(sidebar, textvariable=best_vars["kelly_half"]).grid(
+        row=5, column=0, sticky="w", padx=6
+    )
+    ttk.Label(sidebar, text="Kelly (negyed)").grid(row=6, column=0, sticky="w", padx=6, pady=(6, 0))
+    ttk.Label(sidebar, textvariable=best_vars["kelly_quarter"]).grid(
+        row=7, column=0, sticky="w", padx=6, pady=(0, 6)
+    )
+
+    def _clear_best_panel() -> None:
+        for v in best_vars.values():
+            v.set("-")
+
+    show_perf = False
+    last_used_best = False
+    odds_edited = False
+    odds_clearing = False
+
+    def _render_odds_view() -> None:
+        nonlocal show_perf, last_used_best, odds_edited
+        show_perf = False
+        tv.configure(columns=odds_cols)
+        for c in odds_cols:
+            tv.heading(c, text=c)
+            tv.column(c, width=120 if c != "Bookmaker" else 200, anchor=tk.W)
+        for i in tv.get_children():
+            tv.delete(i)
+        for o in odds_list:
+            bid = int(o.bookmaker_id)
+            bm_name = names.get(bid, str(bid))
+            home = f"{float(o.home):.2f}"
+            draw = f"{float(o.draw):.2f}"
+            away = f"{float(o.away):.2f}"
+            tv.insert("", "end", values=[bm_name, home, draw, away])
+        last_used_best = False
+        odds_edited = False
+        _update_best_panel(_build_perf_rows() or [])
+
+    def _parse_odds() -> tuple[float, float, float] | None:
+        nonlocal last_used_best
+        try:
+
+            def _to_float(val: str) -> float | None:
+                try:
+                    v = val.strip()
+                    return float(v.replace(",", ".")) if v else None
+                except Exception:
+                    return None
+
+            oh_in = _to_float(home_var.get())
+            od_in = _to_float(draw_var.get())
+            oa_in = _to_float(away_var.get())
+
+            used_best = False
+            if oh_in is None or od_in is None or oa_in is None:
+                if best_triplet is None:
+                    return None
+                oh, od, oa = best_triplet
+                used_best = True
+            else:
+                oh, od, oa = oh_in, od_in, oa_in
+                if min(oh, od, oa) <= 1.0:
+                    # Invalid custom odds -> fallback to best if available
+                    if best_triplet is None:
+                        return None
+                    oh, od, oa = best_triplet
+                    used_best = True
+                elif best_triplet is not None:
+                    try:
+                        tol = 1e-6
+                        if (
+                            abs(oh - best_triplet[0]) < tol
+                            and abs(od - best_triplet[1]) < tol
+                            and abs(oa - best_triplet[2]) < tol
+                        ):
+                            used_best = True
+                    except Exception:
+                        pass
+            last_used_best = used_best
+            return oh, od, oa
+        except Exception:
+            return None
+
+    def _parse_bankroll() -> float | None:
+        try:
+            raw = bankroll_var.get().strip()
+            if not raw:
+                return None
+            val = float(raw.replace(",", "."))
+            return val if val > 0 else None
+        except Exception:
+            return None
+
+    def _update_best_panel(perf_rows: list[dict[str, Any]]) -> None:
+        if not perf_rows:
+            _clear_best_panel()
+            return
+        selected = model_var.get()
+        candidates = (
+            [r for r in perf_rows if selected != "(Mind)" and r["label"] == selected]
+            if selected != "(Mind)"
+            else perf_rows
+        )
+        if not candidates:
+            _clear_best_panel()
+            return
+        best_tip = max(candidates, key=lambda r: r["ev_tip"])
+        bm_raw = best_tip.get("bm")
+        if not last_used_best:
+            best_heading.set("Legjobb tipp EV (egyedi odds)")
+        elif bm_raw:
+            best_heading.set(f"Legjobb tipp EV ({bm_raw})")
+        else:
+            best_heading.set("Legjobb tipp EV")
+        bm_part = (
+            f" ({bm_raw})"
+            if (bm_raw and last_used_best)
+            else (" (Egyedi)" if not last_used_best else "")
+        )
+        tip_text = f"{best_tip['label']}{bm_part}: {best_tip['tip']} @ {best_tip['tip_odd']:.2f} ({best_tip['ev_tip']*100.0:+.0f}%)"
+        best_vars["tip"].set(tip_text)
+
+        bankroll_val = _parse_bankroll()
+        ks = (
+            _kelly_stakes(bankroll_val, best_tip["tip_prob"], best_tip["tip_odd"])
+            if bankroll_val
+            else None
+        )
+
+        def _fmt_kelly(stake: float | None) -> str:
+            try:
+                if stake is None or bankroll_val is None:
+                    return "-"
+                profit = stake * best_tip["ev_tip"]
+                stake_pct = stake / bankroll_val * 100.0
+                profit_pct = profit / bankroll_val * 100.0
+                return (
+                    f"{stake:.0f} ({stake_pct:.1f}%) | Profit: {profit:+.0f} ({profit_pct:+.1f}%)"
+                )
+            except Exception:
+                return "-"
+
+        if ks is not None:
+            full, half, quarter = ks
+            best_vars["kelly_full"].set(_fmt_kelly(full))
+            best_vars["kelly_half"].set(_fmt_kelly(half))
+            best_vars["kelly_quarter"].set(_fmt_kelly(quarter))
+        else:
+            best_vars["kelly_full"].set("-")
+            best_vars["kelly_half"].set("-")
+            best_vars["kelly_quarter"].set("-")
+
+    def _build_perf_rows() -> list[dict[str, Any]] | None:
+        odds_triplet = _parse_odds()
+        if odds_triplet is None:
+            return None
+        oh, od, oa = odds_triplet
+        rows: list[dict[str, Any]] = []
+        for r in model_rows:
+            p1 = float(r["p1"])
+            px = float(r["px"])
+            p2 = float(r["p2"])
+            if r["pref"] in {"1", "X", "2"}:
+                tip = cast(str, r["pref"])
+            else:
+                vals = [("1", p1), ("X", px), ("2", p2)]
+                tip, _ = max(vals, key=lambda x: x[1])
+            tip_prob = p1 if tip == "1" else (px if tip == "X" else p2)
+            tip_odd = oh if tip == "1" else (od if tip == "X" else oa)
+            ev_tip = tip_prob * tip_odd - 1.0
+            evs = {
+                "1": p1 * oh - 1.0,
+                "X": px * od - 1.0,
+                "2": p2 * oa - 1.0,
+            }
+            rows.append(
+                {
+                    "label": r["label"],
+                    "tip": tip,
+                    "tip_odd": tip_odd,
+                    "ev_tip": ev_tip,
+                    "tip_prob": tip_prob,
+                    "bm": (
+                        best_bm_triplet.get(tip) if (last_used_best and best_bm_triplet) else None
+                    ),
+                    "p1": p1,
+                    "px": px,
+                    "p2": p2,
+                    "evs": evs,
+                }
+            )
+        return rows
+
+    def _render_perf_view(perf_rows: list[dict[str, Any]] | None = None) -> None:
+        nonlocal show_perf
+        show_perf = True
+        if perf_rows is None:
+            perf_rows = _build_perf_rows()
+        if perf_rows is None:
+            return
+        tv.configure(columns=perf_cols)
+        for c in perf_cols:
+            width = 120
+            anchor_val: Literal["center", "w"] = "center" if c != "Modell" else "w"
+            tv.heading(c, text=c)
+            tv.column(c, width=width, anchor=anchor_val)
+        for i in tv.get_children():
+            tv.delete(i)
+        selected = model_var.get()
+        for r in perf_rows:
+            if selected != "(Mind)" and r["label"] != selected:
+                continue
+            ev_tag = "ev_pos" if r["ev_tip"] > 0 else "ev_neg" if r["ev_tip"] < 0 else ""
+            tv.insert(
+                "",
+                "end",
+                values=[
+                    r["label"],
+                    r["tip"],
+                    f"{r['tip_odd']:.2f}",
+                    f"{r['ev_tip'] * 100.0:+.0f}%",
+                    f"{r['p1'] * 100.0:.0f}%",
+                    f"{r['px'] * 100.0:.0f}%",
+                    f"{r['p2'] * 100.0:.0f}%",
+                ],
+                tags=(ev_tag,) if ev_tag else (),
+            )
+        _update_best_panel(perf_rows)
+
+    def _recompute() -> None:
+        perf_rows = _build_perf_rows()
+        if perf_rows is None:
+            _clear_best_panel()
+            return
+        _update_best_panel(perf_rows)
+        if model_var.get() != "(Mind)":
+            _render_perf_view(perf_rows)
+
+    def _on_model_change(*_args: Any) -> None:
+        nonlocal show_perf
+        if model_var.get() == "(Mind)":
+            show_perf = False
+            _render_odds_view()
+        else:
+            show_perf = True
+            _recompute()
+
+    def _on_odds_change(*_args: Any) -> None:
+        nonlocal odds_edited
+        if not odds_clearing:
+            odds_edited = True
+        if model_var.get() != "(Mind)":
+            _recompute()
+        else:
+            _update_best_panel(_build_perf_rows() or [])
+
+    def _clear_odds_fields() -> None:
+        nonlocal odds_edited, odds_clearing
+        odds_clearing = True
+        try:
+            home_var.set("")
+            draw_var.set("")
+            away_var.set("")
+        finally:
+            odds_clearing = False
+        odds_edited = False
+        if model_var.get() != "(Mind)":
+            _recompute()
+        else:
+            _update_best_panel(_build_perf_rows() or [])
+
+    def _on_bankroll_change(*_args: Any) -> None:
+        _update_best_panel(_build_perf_rows() or [])
+        if model_var.get() != "(Mind)":
+            _recompute()
+
+    model_var.trace_add("write", _on_model_change)
+    model_combo.state(["readonly"])
+    home_var.trace_add("write", _on_odds_change)
+    draw_var.trace_add("write", _on_odds_change)
+    away_var.trace_add("write", _on_odds_change)
+    bankroll_var.trace_add("write", _on_bankroll_change)
+    clear_btn.configure(command=_clear_odds_fields)
+
+    _render_odds_view()
     try:
         _normalize_widget_texts(top)
     except Exception:
         pass
-
-    for o in odds_list:
-        bid = int(o.bookmaker_id)
-        bm_name = names.get(bid, str(bid))
-        home = f"{float(o.home):.2f}"
-        draw = f"{float(o.draw):.2f}"
-        away = f"{float(o.away):.2f}"
-        tv.insert("", "end", values=[bm_name, home, draw, away])
 
     # Removed old full-coverage helpers: _tomorrow_bounds_iso, _get_tomorrow_match_ids,
     # _models_for_match, _default_model_names
