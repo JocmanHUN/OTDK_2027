@@ -490,7 +490,12 @@ class HistoryService:
         """
         try:
             payload = self._client.get("fixtures", {"id": str(int(fixture_id))})
-        except Exception:
+        except Exception as exc:
+            # Let APIError propagate so callers can halt on rate limit; swallow others
+            from src.infrastructure.api_football_client import APIError  # local import
+
+            if isinstance(exc, APIError):
+                raise
             return None
         if not isinstance(payload, Mapping):
             return None

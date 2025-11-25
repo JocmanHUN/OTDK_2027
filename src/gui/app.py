@@ -100,6 +100,7 @@ _MOJIBAKE_MAP: Dict[str, str] = {
 # Global process-level throttles/state
 _RESULT_CHECKED_AT: Dict[int, float] = {}
 _LAST_RETRY_PRED_AT: float | None = None
+_RATE_LIMIT_REACHED: bool = False
 
 
 def _fix_mojibake(s: str) -> str:
@@ -177,6 +178,11 @@ def _tomorrow_budapest_date_str() -> str:
 
 
 def _select_fixtures_for_tomorrow() -> List[Mapping[str, Any]]:
+    global _RATE_LIMIT_REACHED
+    if _RATE_LIMIT_REACHED:
+        return []
+    from src.infrastructure.api_football_client import APIError  # local import to avoid cycle
+
     leagues = _load_xg_leagues() or LeaguesService().get_current_leagues()
     fx_svc = FixturesService()
     odds_svc = OddsService()
@@ -186,7 +192,19 @@ def _select_fixtures_for_tomorrow() -> List[Mapping[str, Any]]:
     for ls in leagues:
         league_id = int(ls["league_id"])
         season = int(ls["season_year"])
-        rows = fx_svc.get_daily_fixtures(day, league_id=league_id, season=season)
+        try:
+            rows = fx_svc.get_daily_fixtures(day, league_id=league_id, season=season)
+        except Exception as exc:
+            msg = str(exc).lower()
+            if (
+                isinstance(exc, APIError)
+                or "request limit" in msg
+                or "ratelimit" in msg
+                or "daily" in msg
+            ):
+                _RATE_LIMIT_REACHED = True
+                break
+            continue
         for r in rows:
             fx_id = r.get("fixture_id")
             if not isinstance(fx_id, int):
@@ -194,7 +212,16 @@ def _select_fixtures_for_tomorrow() -> List[Mapping[str, Any]]:
             try:
                 if odds_svc.get_fixture_odds(fx_id):
                     fixtures.append(r)
-            except Exception:
+            except Exception as exc:
+                err = str(exc).lower()
+                if (
+                    isinstance(exc, APIError)
+                    or "request limit" in err
+                    or "ratelimit" in err
+                    or "daily" in err
+                ):
+                    _RATE_LIMIT_REACHED = True
+                    return fixtures
                 continue
     return fixtures
 
@@ -670,6 +697,9 @@ def _update_missing_results(conn: sqlite3.Connection) -> None:
     For each match with date < now and NULL real_result, query API for result
     and persist '1'/'X'/'2' when available.
     """
+    global _RATE_LIMIT_REACHED
+    if _RATE_LIMIT_REACHED:
+        return
     try:
         # Use a separate write connection to avoid read-only GUI connection
         try:
@@ -704,7 +734,11 @@ def _update_missing_results(conn: sqlite3.Connection) -> None:
                 if label in {"1", "X", "2"}:
                     mrepo.update_result(int(mid), str(label))
                 _RESULT_CHECKED_AT[int(mid)] = time.time()
-            except Exception:
+            except Exception as exc:
+                msg = str(exc).lower()
+                if "request limit" in msg or "ratelimit" in msg or "daily" in msg:
+                    _RATE_LIMIT_REACHED = True
+                    break
                 continue
     except Exception:
         pass

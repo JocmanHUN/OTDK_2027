@@ -110,7 +110,11 @@ class APIFootballClient:
                 if 200 <= resp.status_code < 300:
                     if resp.headers.get("Content-Type", "").startswith("application/json"):
                         payload = resp.json()
-                        if _payload_has_rate_limit_error(payload):
+                        rl_level = _extract_rate_limit_level(payload)
+                        if rl_level:
+                            # Daily limit -> fail fast, Minute/general -> retry
+                            if rl_level == "daily":
+                                raise APIError("Daily rate limit reached", status_code=429)
                             retry_after = self._compute_sleep_seconds(attempt, resp)
                             retry_after = max(
                                 float(_RATE_LIMIT_SLEEP_SECONDS),
@@ -238,20 +242,33 @@ class APIFootballClient:
             print(f"<unable to read body: {exc}>", flush=True)
 
 
-def _payload_has_rate_limit_error(payload: Any) -> bool:
+def _extract_rate_limit_level(payload: Any) -> str | None:
+    """Return 'daily' or 'minute' if payload shows rate-limit message, else None."""
     if not isinstance(payload, Mapping):
-        return False
+        return None
     errors = payload.get("errors")
     if not isinstance(errors, Mapping):
-        return False
+        return None
     for key, value in errors.items():
         key_str = str(key).lower()
-        if key_str in {"ratelimit", "rate_limit"} and value:
+        if key_str in {"ratelimit", "rate_limit", "requests", "request_limit", "request"} and value:
+            msg = ""
             if isinstance(value, str):
-                return bool(value.strip())
-            if isinstance(value, Mapping):
-                return bool(value)
-            if isinstance(value, list):
-                return bool(value)
-            return True
-    return False
+                msg = value
+            elif isinstance(value, Mapping):
+                msg = " ".join(str(v) for v in value.values())
+            elif isinstance(value, list):
+                msg = " ".join(str(v) for v in value)
+            msg_low = msg.lower()
+            if "per minute" in msg_low or "per minute" in key_str or "minute" in msg_low:
+                return "minute"
+            if (
+                "per day" in msg_low
+                or "for the day" in msg_low
+                or "for the day" in key_str
+                or "per day" in key_str
+                or "day" in msg_low
+            ):
+                return "daily"
+            return "minute"
+    return None
