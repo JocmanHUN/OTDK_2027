@@ -139,8 +139,13 @@ def _save_odds(conn: sqlite3.Connection, match_id: int, odds_list: list) -> None
 
 
 def _compute_and_store_predictions(
-    conn: sqlite3.Connection, f: Mapping[str, Any], odds_list: list[Any] | list
+    conn: sqlite3.Connection,
+    f: Mapping[str, Any],
+    odds_list: list[Any] | list,
+    *,
+    log_date: str | None = None,
 ) -> None:
+    from src.application.services.export_logging import log_features_csv
     from src.application.services.history_service import HistoryService
     from src.application.services.prediction_pipeline import (
         ContextBuilder,
@@ -201,6 +206,12 @@ def _compute_and_store_predictions(
         away_team_id=away_i,
     )
 
+    if log_date:
+        try:
+            log_features_csv(log_date, f, ctx)
+        except Exception:
+            pass
+
     # Minimal domain match for models
     match = Match(
         fixture_id=FixtureId(fx_id),
@@ -258,6 +269,7 @@ def main(argv: list[str] | None = None) -> int:
     db_path = os.path.abspath(args.db)
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
 
+    from src.application.services.export_logging import log_odds_csv
     from src.application.services.fixtures_service import FixturesService
     from src.application.services.odds_service import OddsService
 
@@ -288,6 +300,11 @@ def main(argv: list[str] | None = None) -> int:
             if not odds_list:
                 continue
 
+            try:
+                log_odds_csv(args.date, f, odds_list)
+            except Exception:
+                pass
+
             # Persist match only once we know there are odds
             _upsert_match(conn, f)
 
@@ -300,7 +317,7 @@ def main(argv: list[str] | None = None) -> int:
             _save_odds(conn, fx_id_i, odds_list)
 
             if args.with_predictions:
-                _compute_and_store_predictions(conn, f, odds_list)
+                _compute_and_store_predictions(conn, f, odds_list, log_date=args.date)
 
     finally:
         conn.close()

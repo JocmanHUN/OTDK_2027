@@ -12,6 +12,7 @@ from pathlib import Path
 from tkinter import messagebox, ttk
 from typing import Any, Dict, List, Literal, Mapping, Tuple, cast
 
+from src.application.services.export_logging import log_features_csv, log_odds_csv
 from src.application.services.fixtures_service import FixturesService
 from src.application.services.history_service import HistoryService
 from src.application.services.leagues_service import LeaguesService
@@ -257,6 +258,7 @@ def _predict_then_persist_if_complete(conn: sqlite3.Connection, fixture: Mapping
         when = fixture.get("date_utc")
         if not isinstance(when, datetime):
             when = datetime.now(timezone.utc)
+        run_date = when.date().isoformat()
 
         # Check if all predictions already exist in DB for this match
         try:
@@ -360,6 +362,10 @@ def _predict_then_persist_if_complete(conn: sqlite3.Connection, fixture: Mapping
             home_team_id=home_id,
             away_team_id=away_id,
         )
+        try:
+            log_features_csv(run_date, fixture, ctx)
+        except Exception:
+            pass
 
         agg = PredictionAggregatorImpl()
         preds = agg.run_all(models, match, ctx)
@@ -392,6 +398,10 @@ def _predict_then_persist_if_complete(conn: sqlite3.Connection, fixture: Mapping
             brepo = BookmakersRepoSqlite(conn)
             odds_list = svc.get_fixture_odds(int(fx_id))
             bm_names = svc.get_fixture_bookmakers(int(fx_id))
+            try:
+                log_odds_csv(run_date, fixture, odds_list)
+            except Exception:
+                pass
             for bid, name in bm_names.items():
                 try:
                     if brepo.get_by_id(int(bid)) is None:
@@ -700,6 +710,10 @@ def _update_missing_results(conn: sqlite3.Connection) -> None:
     global _RATE_LIMIT_REACHED
     if _RATE_LIMIT_REACHED:
         return
+    from datetime import datetime as _dt
+
+    from src.application.services.export_logging import log_result_csv
+
     try:
         # Use a separate write connection to avoid read-only GUI connection
         try:
@@ -733,6 +747,23 @@ def _update_missing_results(conn: sqlite3.Connection) -> None:
                 label = history.get_fixture_result_label(int(mid))
                 if label in {"1", "X", "2"}:
                     mrepo.update_result(int(mid), str(label))
+                    try:
+                        m = mrepo.get_by_id(int(mid))
+                        if m is not None:
+                            log_result_csv(
+                                _dt.now(timezone.utc).date().isoformat(),
+                                {
+                                    "fixture_id": m.id,
+                                    "league_id": m.league_id,
+                                    "season": m.season,
+                                    "date_utc": m.date,
+                                    "home_team": m.home_team,
+                                    "away_team": m.away_team,
+                                },
+                                str(label),
+                            )
+                    except Exception:
+                        pass
                 _RESULT_CHECKED_AT[int(mid)] = time.time()
             except Exception as exc:
                 msg = str(exc).lower()
