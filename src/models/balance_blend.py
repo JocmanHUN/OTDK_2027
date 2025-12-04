@@ -94,7 +94,7 @@ def _rows_have_xg(rows: list[dict]) -> bool:
 
 @dataclass
 class BalanceBlendModel(BasePredictiveModel):
-    """Balance model that blends result-form with xG-form via alpha mixing."""
+    """Balance model that blends result-form with xG-form via alpha mixing (default/low draw sensitivity)."""
 
     name: ClassVar[ModelName] = ModelName.BALANCE_BLEND
     version: ClassVar[str] = "2-blend"
@@ -180,3 +180,25 @@ class BalanceBlendModel(BasePredictiveModel):
             version=self.version,
             status=PredictionStatus.OK,
         )
+
+
+@dataclass
+class BalanceBlendMediumModel(BalanceBlendModel):
+    """Balance blend variant with a wider xG draw band (more draw-sensitive)."""
+
+    name: ClassVar[ModelName] = ModelName.BALANCE_BLEND_MEDIUM
+    version: ClassVar[str] = "2-blend-med"
+
+    xg_threshold: float = 0.2
+    mix_weight: float = 0.25
+
+
+@dataclass
+class BalanceBlendHighModel(BalanceBlendModel):
+    """Balance blend variant that is most draw-friendly among blends."""
+
+    name: ClassVar[ModelName] = ModelName.BALANCE_BLEND_HIGH
+    version: ClassVar[str] = "2-blend-high"
+
+    xg_threshold: float = 0.25
+    mix_weight: float = 0.35

@@ -59,6 +59,8 @@ class EloModel(BasePredictiveModel):
         cfg = get_tier_config(league_id)
 
         svc: _EloSvcProto = self.elo_service or EloService()
+        rating_map: dict[int, float] | None = None
+        missing_league_ratings = False
 
         # Use context ELOs if present; otherwise compute via service (requires team IDs)
         if ctx.elo_home is not None and ctx.elo_away is not None:
@@ -74,8 +76,32 @@ class EloModel(BasePredictiveModel):
                     status=PredictionStatus.SKIPPED,
                     skip_reason="Missing team IDs in context",
                 )
-            r_home = svc.get_team_rating(league_id, season, int(ctx.home_team_id))
-            r_away = svc.get_team_rating(league_id, season, int(ctx.away_team_id))
+            # Try to fetch the whole league table once so we can detect empty history
+            get_map = getattr(svc, "get_league_ratings", None)
+            if callable(get_map):
+                try:
+                    rating_map = get_map(league_id, season)
+                    missing_league_ratings = isinstance(rating_map, dict) and len(rating_map) == 0
+                except Exception:
+                    rating_map = None
+            base_elo = float(cfg.base_elo)
+            if isinstance(rating_map, dict):
+                r_home = rating_map.get(int(ctx.home_team_id), base_elo)
+                r_away = rating_map.get(int(ctx.away_team_id), base_elo)
+            else:
+                r_home = svc.get_team_rating(league_id, season, int(ctx.home_team_id))
+                r_away = svc.get_team_rating(league_id, season, int(ctx.away_team_id))
+
+        if missing_league_ratings:
+            probs = ProbabilityTriplet(home=1.0 / 3.0, draw=1.0 / 3.0, away=1.0 / 3.0)
+            return Prediction(
+                fixture_id=match.fixture_id,
+                model=self.name,
+                probs=probs,
+                computed_at_utc=datetime.now(timezone.utc),
+                version=self.version,
+                status=PredictionStatus.OK,
+            )
 
         delta = r_home - r_away + float(cfg.home_adv)
         nu_in = float(self.draw_param if self.draw_param is not None else EloParams().draw_param)

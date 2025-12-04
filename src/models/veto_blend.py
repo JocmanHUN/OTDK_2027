@@ -94,7 +94,7 @@ def _rows_have_xg(rows: list[dict]) -> bool:
 
 @dataclass
 class VetoBlendModel(BasePredictiveModel):
-    """Veto model that blends result-form with xG-form via alpha mixing."""
+    """Veto model that blends result-form with xG-form via alpha mixing (default/low draw sensitivity)."""
 
     name: ClassVar[ModelName] = ModelName.VETO_BLEND
     version: ClassVar[str] = "2-blend"
@@ -191,3 +191,27 @@ class VetoBlendModel(BasePredictiveModel):
             version=self.version,
             status=PredictionStatus.OK,
         )
+
+
+@dataclass
+class VetoBlendMediumModel(VetoBlendModel):
+    """Veto blend variant with a wider draw band and softer product weight."""
+
+    name: ClassVar[ModelName] = ModelName.VETO_BLEND_MEDIUM
+    version: ClassVar[str] = "2-blend-med"
+
+    xg_threshold: float = 0.2
+    mix_weight: float = 0.25
+    mul_weight: float = 0.5
+
+
+@dataclass
+class VetoBlendHighModel(VetoBlendModel):
+    """Veto blend variant most inclined to keep draws alive."""
+
+    name: ClassVar[ModelName] = ModelName.VETO_BLEND_HIGH
+    version: ClassVar[str] = "2-blend-high"
+
+    xg_threshold: float = 0.25
+    mix_weight: float = 0.35
+    mul_weight: float = 0.4

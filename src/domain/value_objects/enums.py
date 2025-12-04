@@ -30,7 +30,11 @@ class ModelName(str, Enum):
     BALANCE_LUCK_MEDIUM = "balance_luck_medium"
     BALANCE_LUCK_HIGH = "balance_luck_high"
     VETO_BLEND = "veto_blend"
+    VETO_BLEND_MEDIUM = "veto_blend_medium"
+    VETO_BLEND_HIGH = "veto_blend_high"
     BALANCE_BLEND = "balance_blend"
+    BALANCE_BLEND_MEDIUM = "balance_blend_medium"
+    BALANCE_BLEND_HIGH = "balance_blend_high"
     VETO_SHIFT = "veto_shift"
     BALANCE_SHIFT = "balance_shift"
 
