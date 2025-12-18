@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Mapping, Optional, Protocol
@@ -198,6 +199,7 @@ class HistoryService:
         needed = int(last)
         cur_season = int(season)
         collected: list[dict[str, Any]] = []
+        empty_streak = 0
 
         # Cache hit for this (team, league, season, last)
         ckey = (int(team_id), int(league_id), int(season), int(last))
@@ -209,6 +211,13 @@ class HistoryService:
             fixtures = self._fetch_team_fixtures_for_season(
                 team_id, league_id, cur_season, only_finished=only_finished
             )
+            if not fixtures:
+                empty_streak += 1
+                if empty_streak >= 2:
+                    break
+                cur_season -= 1
+                continue
+            empty_streak = 0
             # Sort by date desc
             fixtures.sort(key=lambda r: r.get("timestamp", 0), reverse=True)
             for fx in fixtures:
@@ -287,11 +296,19 @@ class HistoryService:
         needed = int(last)
         cur_season = int(season)
         collected: list[dict[str, Any]] = []
+        empty_streak = 0
 
         while needed > 0 and cur_season >= 2000:
             fixtures = self._fetch_team_fixtures_for_season(
                 team_id, league_id, cur_season, only_finished=only_finished
             )
+            if not fixtures:
+                empty_streak += 1
+                if empty_streak >= 2:
+                    break
+                cur_season -= 1
+                continue
+            empty_streak = 0
             fixtures.sort(key=lambda r: r.get("timestamp", 0), reverse=True)
             for fx in fixtures:
                 if needed <= 0:
@@ -460,6 +477,7 @@ class HistoryService:
             return cached
         payload = self._client.get("fixtures/statistics", {"fixture": str(int(fixture_id))})
         result: dict[int, dict[str, float]] = {}
+        team_has_xg: dict[int, bool] = {}
         if isinstance(payload, Mapping):
             for item in payload.get("response", []) or []:
                 team = item.get("team") or {}
@@ -467,14 +485,25 @@ class HistoryService:
                 stats_arr = item.get("statistics") or []
                 if t_id is None:
                     continue
+                t_id_int = int(t_id)
+                team_has_xg.setdefault(t_id_int, False)
                 bucket: dict[str, float] = {}
                 for s in stats_arr:
                     name = str(s.get("type") or "").strip().lower()
                     val = s.get("value")
                     norm = _normalize_stat_value(val)
+                    if name and (("xg" in name) or ("expected" in name and "goal" in name)):
+                        if norm is not None:
+                            team_has_xg[t_id_int] = True
                     if norm is not None and name:
                         bucket[name] = norm
-                result[int(t_id)] = bucket
+                result[t_id_int] = bucket
+        if not team_has_xg or any(not has for has in team_has_xg.values()):
+            try:
+                payload_dump = json.dumps(payload, ensure_ascii=True, default=str)
+            except Exception:
+                payload_dump = str(payload)
+            print(f"[XG-MISS] fixture {fixture_id}: {payload_dump}")
         try:
             self._cache_fixture_stats.set(int(fixture_id), result)
         except Exception:

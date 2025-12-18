@@ -102,6 +102,16 @@ _MOJIBAKE_MAP: Dict[str, str] = {
 _RESULT_CHECKED_AT: Dict[int, float] = {}
 _LAST_RETRY_PRED_AT: float | None = None
 _RATE_LIMIT_REACHED: bool = False
+_PIPELINE_STATUS_VAR: tk.StringVar | None = None
+
+
+def _log_pipeline(message: str) -> None:
+    print(f"[PIPELINE] {message}")
+    if _PIPELINE_STATUS_VAR is not None:
+        try:
+            _PIPELINE_STATUS_VAR.set(message)
+        except Exception:
+            pass
 
 
 def _fix_mojibake(s: str) -> str:
@@ -249,6 +259,7 @@ def _predict_then_persist_if_complete(conn: sqlite3.Connection, fixture: Mapping
         fx_id_val = fixture.get("fixture_id")
         league_id_val = fixture.get("league_id")
         if not isinstance(fx_id_val, int) or not isinstance(league_id_val, int):
+            _log_pipeline("fixture skip: missing fixture_id or league_id")
             return False
         fx_id = int(fx_id_val)
         league_id = int(league_id_val)
@@ -259,6 +270,15 @@ def _predict_then_persist_if_complete(conn: sqlite3.Connection, fixture: Mapping
         if not isinstance(when, datetime):
             when = datetime.now(timezone.utc)
         run_date = when.date().isoformat()
+        home_name = str(fixture.get("home_name") or fixture.get("home_id") or "").strip()
+        away_name = str(fixture.get("away_name") or fixture.get("away_id") or "").strip()
+        label = f"{home_name} vs {away_name}".strip()
+        if label == "vs":
+            label = ""
+        if label:
+            _log_pipeline(f"fixture {fx_id}: start {label}")
+        else:
+            _log_pipeline(f"fixture {fx_id}: start")
 
         # Check if all predictions already exist in DB for this match
         try:
@@ -275,6 +295,7 @@ def _predict_then_persist_if_complete(conn: sqlite3.Connection, fixture: Mapping
             )
             present = {str(r[0]) for r in cur.fetchall()}
             if expected_models and expected_models.issubset(present):
+                _log_pipeline(f"fixture {fx_id}: already saved")
                 return True
         except Exception:
             pass
@@ -371,7 +392,57 @@ def _predict_then_persist_if_complete(conn: sqlite3.Connection, fixture: Mapping
         preds = agg.run_all(models, match, ctx)
 
         # All models must produce probabilities (no SKIPPED)
-        if any(p.probs is None for p in preds):
+        skipped = [p for p in preds if p.probs is None]
+        if skipped:
+            reasons: list[str] = []
+            seen: set[str] = set()
+            for p in skipped:
+                model_name = str(getattr(p.model, "value", p.model))
+                reason = str(p.skip_reason or "missing probabilities")
+                item = f"{model_name}: {reason}"
+                if item not in seen:
+                    seen.add(item)
+                    reasons.append(item)
+            reason_msg = "; ".join(reasons) if reasons else "missing probabilities"
+            _log_pipeline(f"fixture {fx_id}: not saved - {reason_msg}")
+            if any("xg" in str(p.skip_reason or "").lower() for p in skipped):
+                hist = None
+                for m in models:
+                    h = getattr(m, "history", None)
+                    if h is not None:
+                        hist = h
+                        break
+                if hist is not None and home_id and away_id:
+                    try:
+                        try:
+                            last_n = max(
+                                int(getattr(m, "last_n", 10))
+                                for m in models
+                                if getattr(m, "history", None) is not None
+                            )
+                        except Exception:
+                            last_n = 10
+
+                        home_rows = hist.get_recent_team_stats(home_id, league_id, season, last_n)
+                        away_rows = hist.get_recent_team_stats(away_id, league_id, season, last_n)
+
+                        def _xg_count(rows: list[dict[str, Any]]) -> tuple[int, int]:
+                            total = len(rows)
+                            with_xg = sum(
+                                1
+                                for r in rows
+                                if r.get("xg_for") is not None and r.get("xg_against") is not None
+                            )
+                            return with_xg, total
+
+                        h_with, h_total = _xg_count(home_rows)
+                        a_with, a_total = _xg_count(away_rows)
+                        _log_pipeline(
+                            f"fixture {fx_id}: xg coverage home {h_with}/{h_total}, "
+                            f"away {a_with}/{a_total}"
+                        )
+                    except Exception as exc:
+                        _log_pipeline(f"fixture {fx_id}: xg check failed - {exc}")
             return False
 
         # Ensure league exists only now (since we will persist)
@@ -449,8 +520,11 @@ def _predict_then_persist_if_complete(conn: sqlite3.Connection, fixture: Mapping
             )
             prepo.insert(dp)
 
+        _log_pipeline(f"fixture {fx_id}: saved")
         return True
-    except Exception:
+    except Exception as exc:
+        fx_label = fixture.get("fixture_id")
+        _log_pipeline(f"fixture {fx_label}: error {exc}")
         return False
     """Compute predictions for a fixture and persist only if all models predicted.
 
@@ -618,27 +692,19 @@ def _predict_then_persist_if_complete(conn: sqlite3.Connection, fixture: Mapping
     # _predict_then_persist_if_complete.
 
 
-def _read_tomorrow_from_db(
+def _read_pending_from_db(
     conn: sqlite3.Connection,
 ) -> Tuple[List[Tuple], Dict[int, Dict[str, Tuple[float, float, float, str | None]]]]:
-    cur = conn.cursor()
-    today_utc = datetime.now(timezone.utc).date()
-    start_utc = datetime.combine(
-        today_utc + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc
-    )
-    end_utc = start_utc + timedelta(days=1)
+    """Return all matches without final result, ordered by kickoff."""
 
-    # Compare ISO-8601 strings directly; stored values are ISO with timezone (+00:00),
-    # and bounds are generated in the same format. Avoid SQLite datetime() which
-    # does not parse "+00:00" offsets reliably.
+    cur = conn.cursor()
     cur.execute(
         """
         SELECT match_id, date, home_team, away_team
         FROM matches
-        WHERE date >= ? AND date < ?
+        WHERE real_result IS NULL
         ORDER BY date ASC
         """,
-        (start_utc.isoformat(), end_utc.isoformat()),
     )
     matches = cur.fetchall()
 
@@ -662,24 +728,32 @@ def _read_tomorrow_from_db(
 
 
 def _read_played_from_db(
-    conn: sqlite3.Connection, *, days: int = 7
+    conn: sqlite3.Connection, *, days: int | None = None
 ) -> Tuple[List[Tuple], Dict[int, Dict[str, Tuple[float, float, float, str | None]]]]:
-    """Return finished matches within the last `days` days with predictions.
+    """Return finished matches (optionally limited to the last `days` days) with predictions."""
 
-    Uses status via persisted `real_result` instead of only date.
-    """
     cur = conn.cursor()
-    now_utc = datetime.now(timezone.utc)
-    start_utc = now_utc - timedelta(days=int(days))
-    cur.execute(
-        """
-        SELECT match_id, date, home_team, away_team
-        FROM matches
-        WHERE real_result IN ('1','X','2') AND date < ? AND date >= ?
-        ORDER BY date DESC
-        """,
-        (now_utc.isoformat(), start_utc.isoformat()),
-    )
+    if days is None:
+        cur.execute(
+            """
+            SELECT match_id, date, home_team, away_team
+            FROM matches
+            WHERE real_result IN ('1','X','2')
+            ORDER BY date DESC
+            """
+        )
+    else:
+        now_utc = datetime.now(timezone.utc)
+        start_utc = now_utc - timedelta(days=int(days))
+        cur.execute(
+            """
+            SELECT match_id, date, home_team, away_team
+            FROM matches
+            WHERE real_result IN ('1','X','2') AND date < ? AND date >= ?
+            ORDER BY date DESC
+            """,
+            (now_utc.isoformat(), start_utc.isoformat()),
+        )
     matches = cur.fetchall()
 
     preds_by_match: Dict[int, Dict[str, Tuple[float, float, float, str | None]]] = {}
@@ -828,6 +902,28 @@ MODEL_HEADERS = {
     "veto_shift": "VetoShift",
 }
 
+ODDS_BINS = [
+    ("Very Low (1.01-1.30)", 1.01, 1.30),
+    ("Low (1.31-1.60)", 1.31, 1.60),
+    ("Medium (1.61-2.20)", 1.61, 2.20),
+    ("High (2.21-3.50)", 2.21, 3.50),
+    ("Very High (3.51-10.00)", 3.51, 10.00),
+    ("Extreme (10.01+)", 10.01, None),
+]
+
+EV_BINS = [
+    ("EV <= -20%", -1e9, -0.20),
+    ("-20% .. -10%", -0.20, -0.10),
+    ("-10% .. 0%", -0.10, 0.0),
+    ("0 .. +5%", 0.0, 0.05),
+    ("+5% .. +10%", 0.05, 0.10),
+    ("+10% .. +20%", 0.10, 0.20),
+    ("+20% .. +50%", 0.20, 0.50),
+    ("+50% .. +100%", 0.50, 1.00),
+    ("+100% .. +200%", 1.00, 2.00),
+    ("EV > +200%", 2.00, 1e9),
+]
+
 
 @dataclass
 class AppState:
@@ -855,6 +951,13 @@ class AppState:
     # Stats side panel
     stats_frame: Any | None = None
     stats_vars: Dict[str, tk.StringVar] | None = None
+    stats_bins_tree: ttk.Treeview | None = None
+    stats_ev_tree: ttk.Treeview | None = None
+    exclude_extremes: bool = False
+    exclude_extremes_var: tk.BooleanVar | None = None
+    # Odds bins window
+    odds_bins_window: Any | None = None
+    odds_bins_tree: ttk.Treeview | None = None
 
 
 def _update_model_stats_panel(
@@ -885,6 +988,15 @@ def _update_model_stats_panel(
         sum_odds = 0.0
         sum_ev = 0.0
         pos_ev_win = 0
+        bin_agg: Dict[str, Dict[str, float | int]] = {
+            label: {"count": 0, "wins": 0, "profit": 0.0} for label, _, _ in ODDS_BINS
+        }
+        ev_agg: Dict[str, Dict[str, float | int]] = {
+            label: {"count": 0, "wins": 0, "profit": 0.0} for label, _, _ in EV_BINS
+        }
+        ev_pos_total = {"count": 0, "wins": 0, "profit": 0.0}
+        ev_neg_total = {"count": 0, "wins": 0, "profit": 0.0}
+        exclude_ext = bool(getattr(state, "exclude_extremes", False))
 
         for mid, _dt_s, _home, _away in filtered_matches:
             try:
@@ -949,19 +1061,64 @@ def _update_model_stats_panel(
                     except Exception:
                         pass
 
+                # If we have odds and probabilities, compute EV
+                p = float(ph) if sel == "1" else (float(pd) if sel == "X" else float(pa))
+                ev = None
+                if odd_val is not None:
+                    ev = p * float(odd_val) - 1.0
+                    # Skip extreme odds/EV if checkbox is on
+                    if exclude_ext and (float(odd_val) > 10.0 or abs(ev) > 2.0):
+                        continue
+
                 total += 1
                 if rr == sel:
                     wins += 1
 
-                # If we have odds and probabilities, compute EV
-                p = float(ph) if sel == "1" else (float(pd) if sel == "X" else float(pa))
                 if odd_val is not None:
                     used += 1
                     sum_odds += float(odd_val)
-                    ev = p * float(odd_val) - 1.0
-                    sum_ev += ev
-                    if ev > 0 and rr == sel:
-                        pos_ev_win += 1
+                    if ev is not None:
+                        sum_ev += ev
+                        if ev > 0 and rr == sel:
+                            pos_ev_win += 1
+                    try:
+                        b = bin_agg.get(_odds_bin_label(float(odd_val)))
+                        if b is not None:
+                            b["count"] = int(b.get("count", 0) or 0) + 1
+                            if rr == sel:
+                                b["wins"] = int(b.get("wins", 0) or 0) + 1
+                                b["profit"] = float(b.get("profit", 0.0) or 0.0) + (
+                                    float(odd_val) - 1.0
+                                )
+                            else:
+                                b["profit"] = float(b.get("profit", 0.0) or 0.0) - 1.0
+                        if ev is not None:
+                            # EV bins
+                            ev_label = _ev_bin_label(ev)
+                            eb = ev_agg.get(ev_label)
+                            if eb is not None:
+                                eb["count"] = int(eb.get("count", 0) or 0) + 1
+                                if rr == sel:
+                                    eb["wins"] = int(eb.get("wins", 0) or 0) + 1
+                                eb["profit"] = float(eb.get("profit", 0.0) or 0.0) + (
+                                    (float(odd_val) - 1.0) if rr == sel else -1.0
+                                )
+                            if ev >= 0:
+                                ev_pos_total["count"] += 1
+                                if rr == sel:
+                                    ev_pos_total["wins"] += 1
+                                ev_pos_total["profit"] += (
+                                    (float(odd_val) - 1.0) if rr == sel else -1.0
+                                )
+                            else:
+                                ev_neg_total["count"] += 1
+                                if rr == sel:
+                                    ev_neg_total["wins"] += 1
+                                ev_neg_total["profit"] += (
+                                    (float(odd_val) - 1.0) if rr == sel else -1.0
+                                )
+                    except Exception:
+                        pass
             except Exception:
                 continue
 
@@ -987,6 +1144,94 @@ def _update_model_stats_panel(
             if v is not None:
                 v.set(str(pos_ev_win))
 
+        # Update odds-bin table
+        bins_tree = getattr(state, "stats_bins_tree", None)
+        if bins_tree is not None:
+            try:
+                for i in bins_tree.get_children():
+                    bins_tree.delete(i)
+                for label, _lo, _hi in ODDS_BINS:
+                    agg = bin_agg.get(label, {"count": 0, "wins": 0, "profit": 0.0})
+                    count = int(agg.get("count", 0) or 0)
+                    wins_b = int(agg.get("wins", 0) or 0)
+                    profit = float(agg.get("profit", 0.0) or 0.0)
+                    hit_b = (wins_b / count * 100.0) if count else None
+                    roi_b = (profit / count * 100.0) if count else None
+                    bins_tree.insert(
+                        "",
+                        "end",
+                        values=[
+                            label,
+                            f"{hit_b:.2f}%" if hit_b is not None else "-",
+                            f"{count:,}" if count else "0",
+                            f"{roi_b:+.2f}%" if roi_b is not None else "-",
+                        ],
+                        tags=(
+                            ("roi_pos",)
+                            if roi_b and roi_b > 0
+                            else ("roi_neg",) if roi_b and roi_b < 0 else ()
+                        ),
+                    )
+            except Exception:
+                pass
+
+        # Update EV-bin table
+        ev_tree = getattr(state, "stats_ev_tree", None)
+        if ev_tree is not None:
+            try:
+                for i in ev_tree.get_children():
+                    ev_tree.delete(i)
+                # Overall positive/negative first
+                for lbl, agg in [
+                    ("EV > 0 összesen", ev_pos_total),
+                    ("EV < 0 összesen", ev_neg_total),
+                ]:
+                    c = int(agg.get("count", 0) or 0)
+                    w = int(agg.get("wins", 0) or 0)
+                    profit = float(agg.get("profit", 0.0) or 0.0)
+                    hit = (w / c * 100.0) if c else None
+                    roi_total = (profit / c * 100.0) if c else None
+                    ev_tree.insert(
+                        "",
+                        "end",
+                        values=[
+                            lbl,
+                            f"{hit:.2f}%" if hit is not None else "-",
+                            f"{c:,}" if c else "0",
+                            f"{roi_total:+.2f}%" if roi_total is not None else "-",
+                        ],
+                        tags=(
+                            ("roi_pos",)
+                            if roi_total and roi_total > 0
+                            else ("roi_neg",) if roi_total and roi_total < 0 else ()
+                        ),
+                    )
+                # Then detailed bins
+                for label, _lo, _hi in EV_BINS:
+                    agg = ev_agg.get(label, {"count": 0, "wins": 0, "profit": 0.0})
+                    count = int(agg.get("count", 0) or 0)
+                    wins_b = int(agg.get("wins", 0) or 0)
+                    profit = float(agg.get("profit", 0.0) or 0.0)
+                    hit_b = (wins_b / count * 100.0) if count else None
+                    roi_b = (profit / count * 100.0) if count else None
+                    ev_tree.insert(
+                        "",
+                        "end",
+                        values=[
+                            label,
+                            f"{hit_b:.2f}%" if hit_b is not None else "-",
+                            f"{count:,}" if count else "0",
+                            f"{roi_b:+.2f}%" if roi_b is not None else "-",
+                        ],
+                        tags=(
+                            ("roi_pos",)
+                            if roi_b and roi_b > 0
+                            else ("roi_neg",) if roi_b and roi_b < 0 else ()
+                        ),
+                    )
+            except Exception:
+                pass
+
         # Show the panel
         try:
             state.stats_frame.grid()
@@ -997,8 +1242,224 @@ def _update_model_stats_panel(
         try:
             if state.stats_frame is not None:
                 state.stats_frame.grid_remove()
+            if state.stats_bins_tree is not None:
+                try:
+                    for i in state.stats_bins_tree.get_children():
+                        state.stats_bins_tree.delete(i)
+                except Exception:
+                    pass
         except Exception:
             pass
+
+
+def _odds_bin_label(odd: float) -> str:
+    for label, low, high in ODDS_BINS:
+        if (low is None or odd >= low) and (high is None or odd <= high):
+            return label
+    return ODDS_BINS[-1][0]
+
+
+def _ev_bin_label(ev: float) -> str:
+    for label, low, high in EV_BINS:
+        if ev >= low and ev <= high:
+            return label
+    return EV_BINS[-1][0]
+
+
+def _model_odds_range_stats(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    stats: Dict[str, Dict[str, Dict[str, float | int]]] = {}
+
+    def _init_model(model_key: str) -> None:
+        stats[model_key] = {
+            label: {"count": 0, "wins": 0, "profit": 0.0} for label, _, _ in ODDS_BINS
+        }
+
+    # Best odds per match (across bookmakers)
+    best_odds: Dict[int, Dict[str, float]] = {}
+    try:
+        for mid, oh, od, oa in conn.execute(
+            "SELECT match_id, MAX(odds_home), MAX(odds_draw), MAX(odds_away) FROM odds GROUP BY match_id"
+        ).fetchall():
+            try:
+                best_odds[int(mid)] = {
+                    "1": float(oh) if oh is not None else 0.0,
+                    "X": float(od) if od is not None else 0.0,
+                    "2": float(oa) if oa is not None else 0.0,
+                }
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    model_order: list[str] = list(MODEL_HEADERS.keys())
+    try:
+        extra_models = [
+            str(r[0])
+            for r in conn.execute(
+                "SELECT DISTINCT model_name FROM predictions ORDER BY model_name"
+            ).fetchall()
+        ]
+        for m in extra_models:
+            if m not in model_order:
+                model_order.append(m)
+    except Exception:
+        pass
+
+    for mk in model_order:
+        _init_model(str(mk))
+
+    try:
+        rows = conn.execute(
+            """
+            SELECT p.model_name, p.predicted_result, m.match_id, m.real_result
+            FROM predictions p
+            JOIN matches m ON m.match_id = p.match_id
+            WHERE m.real_result IN ('1','X','2')
+            """
+        ).fetchall()
+    except Exception:
+        rows = []
+
+    for model_name, pref, mid, real_res in rows:
+        try:
+            mk = str(model_name)
+            sel = str(pref)
+            if sel not in {"1", "X", "2"}:
+                continue
+            odds_trip = best_odds.get(int(mid))
+            if not odds_trip:
+                continue
+            odd_val = odds_trip.get(sel)
+            if odd_val is None:
+                continue
+            odd = float(odd_val)
+            if odd <= 0.0:
+                continue
+            if mk not in stats:
+                _init_model(mk)
+            label = _odds_bin_label(odd)
+            entry = stats[mk][label]
+            entry["count"] = int(entry.get("count", 0)) + 1
+            win = str(real_res) == sel
+            if win:
+                entry["wins"] = int(entry.get("wins", 0)) + 1
+                entry["profit"] = float(entry.get("profit", 0.0)) + (odd - 1.0)
+            else:
+                entry["profit"] = float(entry.get("profit", 0.0)) - 1.0
+        except Exception:
+            continue
+
+    rows_out: list[dict[str, Any]] = []
+    for mk in model_order:
+        model_stats = stats.get(mk)
+        if not model_stats:
+            continue
+        label_disp = MODEL_HEADERS.get(mk, mk)
+        for label, _lo, _hi in ODDS_BINS:
+            entry = model_stats.get(label, {"count": 0, "wins": 0, "profit": 0.0})
+            count = int(entry.get("count", 0) or 0)
+            wins = int(entry.get("wins", 0) or 0)
+            profit = float(entry.get("profit", 0.0) or 0.0)
+            hit = (wins / count * 100.0) if count else None
+            roi = (profit / count * 100.0) if count else None
+            rows_out.append(
+                {
+                    "model_key": mk,
+                    "model_label": label_disp,
+                    "odds_range": label,
+                    "count": count,
+                    "hit_rate": hit,
+                    "roi": roi,
+                }
+            )
+    return rows_out
+
+
+def _refresh_odds_bins_window(state: AppState) -> None:
+    try:
+        tv = getattr(state, "odds_bins_tree", None)
+        conn = getattr(state, "conn", None)
+        if tv is None or conn is None:
+            return
+        rows = _model_odds_range_stats(conn)
+        for i in tv.get_children():
+            tv.delete(i)
+        for r in rows:
+            hit_val = r.get("hit_rate")
+            roi_val = r.get("roi")
+            hit_str = f"{hit_val:.2f}%" if hit_val is not None else "-"
+            roi_str = f"{roi_val:+.2f}%" if roi_val is not None else "-"
+            count = int(r.get("count", 0) or 0)
+            count_str = f"{count:,}" if count else "0"
+            tag = "roi_pos" if (roi_val or 0) > 0 else "roi_neg" if (roi_val or 0) < 0 else ""
+            tv.insert(
+                "",
+                "end",
+                values=[r.get("model_label"), r.get("odds_range"), hit_str, count_str, roi_str],
+                tags=(tag,) if tag else (),
+            )
+    except Exception:
+        pass
+
+
+def _open_odds_bins_window(state: AppState) -> None:
+    try:
+        win = getattr(state, "odds_bins_window", None)
+        if win is not None:
+            try:
+                if not win.winfo_exists():
+                    win = None
+            except Exception:
+                win = None
+        if win is None:
+            win = tk.Toplevel()
+            win.title("Odds sáv statisztika modellenként")
+            cols = ("Modell", "Odds Range", "Hit Rate", "Match Count", "ROI")
+            tv = ttk.Treeview(win, columns=cols, show="headings", height=20)
+            tv.heading("Modell", text="Modell")
+            tv.heading("Odds Range", text="Odds Range")
+            tv.heading("Hit Rate", text="Hit Rate")
+            tv.heading("Match Count", text="Match Count")
+            tv.heading("ROI", text="ROI")
+            widths = {
+                "Modell": 140,
+                "Odds Range": 160,
+                "Hit Rate": 90,
+                "Match Count": 110,
+                "ROI": 80,
+            }
+            for col in cols:
+                tv.column(
+                    col, width=widths.get(col, 100), anchor=("center" if col != "Modell" else "w")
+                )
+            vsb = ttk.Scrollbar(win, orient="vertical", command=tv.yview)
+            tv.configure(yscrollcommand=vsb.set)
+            tv.grid(row=0, column=0, sticky="nsew")
+            vsb.grid(row=0, column=1, sticky="ns")
+            btn = ttk.Button(
+                win,
+                text="Frissítés",
+                command=lambda: _refresh_odds_bins_window(state),
+            )
+            btn.grid(row=1, column=0, sticky="w", padx=6, pady=6)
+            try:
+                tv.tag_configure("roi_pos", foreground="#006400")
+                tv.tag_configure("roi_neg", foreground="#8b0000")
+            except Exception:
+                pass
+            win.grid_rowconfigure(0, weight=1)
+            win.grid_columnconfigure(0, weight=1)
+            state.odds_bins_window = win
+            state.odds_bins_tree = tv
+        _refresh_odds_bins_window(state)
+        try:
+            win.deiconify()
+            win.lift()
+            win.focus_force()
+        except Exception:
+            pass
+    except Exception:
+        pass
 
 
 def _best_label_and_pct(
@@ -1061,7 +1522,9 @@ def refresh_table(state: AppState, *, allow_network: bool = True) -> None:
                         write_conn = _ensure_db()
                     except Exception:
                         write_conn = state.conn
+                    _log_pipeline("pipeline: retrying fixtures")
                     fixtures = _select_fixtures_for_tomorrow()
+                    _log_pipeline(f"pipeline: retry fixtures={len(fixtures)}")
                     for r in fixtures:
                         try:
                             _predict_then_persist_if_complete(write_conn, r)
@@ -1071,9 +1534,9 @@ def refresh_table(state: AppState, *, allow_network: bool = True) -> None:
         except Exception:
             pass
     if getattr(state, "show_played", False):
-        matches, preds_by_match = _read_played_from_db(state.conn, days=7)
+        matches, preds_by_match = _read_played_from_db(state.conn, days=None)
     else:
-        matches, preds_by_match = _read_tomorrow_from_db(state.conn)
+        matches, preds_by_match = _read_pending_from_db(state.conn)
 
     # Apply bookmaker filter: None -> only matches with any odds; otherwise only those with a row for selected bookmaker
     def _has_any_odds(mid: int) -> bool:
@@ -1860,13 +2323,15 @@ def run_app() -> None:
     except Exception:
         pass
 
-    # Dump raw API responses while the GUI-triggered pipeline runs (debug aid)
+    # Disable raw API response logging for GUI sessions.
     try:
-        set_api_response_logging(True)
+        set_api_response_logging(False)
     except Exception:
         pass
 
     status_var = tk.StringVar(value="Adatok bet\u00f6lt\u00e9se...")
+    global _PIPELINE_STATUS_VAR
+    _PIPELINE_STATUS_VAR = status_var
     status_lbl = ttk.Label(root, textvariable=status_var)
     status_lbl.grid(row=3, column=0, sticky="w", padx=6, pady=4)
     # Normalize initial status text to proper UTF-8
@@ -2057,6 +2522,59 @@ def run_app() -> None:
             )
         state.stats_frame = stats_frame
         state.stats_vars = stats_vars
+        # Odds-bin table for selected model (played view)
+        bin_cols = ("Odds sáv", "Találati arány", "Minta", "ROI")
+        bins_tree = ttk.Treeview(stats_frame, columns=bin_cols, show="headings", height=7)
+        for idx, col in enumerate(bin_cols):
+            anchor_val_bin: Literal["center", "w"] = "w" if idx == 0 else "center"
+            width = 120 if idx == 0 else 90
+            bins_tree.heading(col, text=col)
+            bins_tree.column(col, width=width, anchor=anchor_val_bin, stretch=False)
+        try:
+            bins_tree.tag_configure("roi_pos", foreground="#006400")
+            bins_tree.tag_configure("roi_neg", foreground="#8b0000")
+        except Exception:
+            pass
+        bins_tree.grid(row=len(labels), column=0, columnspan=2, sticky="nsew", padx=6, pady=(6, 4))
+        state.stats_bins_tree = bins_tree
+        # EV-bin table (positive/negative EV ranges)
+        ev_cols = ("EV sáv", "Találati arány", "Minta", "ROI")
+        ev_tree = ttk.Treeview(stats_frame, columns=ev_cols, show="headings", height=7)
+        for idx, col in enumerate(ev_cols):
+            anchor_val_ev: Literal["center", "w"] = "w" if idx == 0 else "center"
+            width = 120 if idx == 0 else 90
+            ev_tree.heading(col, text=col)
+            ev_tree.column(col, width=width, anchor=anchor_val_ev, stretch=False)
+        try:
+            ev_tree.tag_configure("roi_pos", foreground="#006400")
+            ev_tree.tag_configure("roi_neg", foreground="#8b0000")
+        except Exception:
+            pass
+        ev_tree.grid(
+            row=len(labels) + 1, column=0, columnspan=2, sticky="nsew", padx=6, pady=(0, 6)
+        )
+        state.stats_ev_tree = ev_tree
+        # Checkbox to drop extreme values from stats
+        try:
+            exclude_var = tk.BooleanVar(value=False)
+            state.exclude_extremes_var = exclude_var
+
+            def _on_toggle_extreme(*_args: Any) -> None:
+                try:
+                    state.exclude_extremes = bool(exclude_var.get())
+                except Exception:
+                    state.exclude_extremes = False
+                refresh_table(state, allow_network=False)
+
+            exclude_var.trace_add("write", _on_toggle_extreme)
+            ttk.Checkbutton(
+                stats_frame,
+                text="Extrém értékek kihagyása",
+                variable=exclude_var,
+            ).grid(row=len(labels) + 2, column=0, columnspan=2, sticky="w", padx=6, pady=(0, 6))
+        except Exception:
+            state.exclude_extremes = False
+            state.exclude_extremes_var = None
         # Hide by default until a model is selected in played view
         try:
             stats_frame.grid_remove()
@@ -2412,7 +2930,9 @@ def run_app() -> None:
         write_conn = _ensure_db()
         # Always refresh holnapi meccsek, and per-fixture csak akkor mentünk,
         # ha minden modell tudott prediktálni.
+        _log_pipeline("pipeline: loading fixtures")
         fixtures = _select_fixtures_for_tomorrow()
+        _log_pipeline(f"pipeline: fixtures={len(fixtures)}")
         for fx in fixtures:
             try:
                 _predict_then_persist_if_complete(write_conn, fx)

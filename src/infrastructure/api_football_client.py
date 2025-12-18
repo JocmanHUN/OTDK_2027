@@ -4,6 +4,7 @@ import logging
 import os
 import random
 import time
+from collections import deque
 from datetime import datetime
 from typing import Any, Mapping, Optional, Protocol, cast
 
@@ -31,6 +32,26 @@ def _env_flag(value: Optional[str]) -> bool:
 
 
 _GLOBAL_LOG_RESPONSES = _env_flag(os.getenv("API_FOOTBALL_LOG_RESPONSES"))
+_REQUEST_TIMES_SEC: deque[float] = deque(maxlen=100)
+_MAX_CALLS_PER_SEC = 5
+
+
+def _throttle_per_second() -> None:
+    """Sleep just enough to keep API calls under the per-second cap."""
+    if _MAX_CALLS_PER_SEC <= 0:
+        return
+    try:
+        now = time.monotonic()
+        cutoff = now - 1.0
+        while _REQUEST_TIMES_SEC and _REQUEST_TIMES_SEC[0] < cutoff:
+            _REQUEST_TIMES_SEC.popleft()
+        if len(_REQUEST_TIMES_SEC) >= _MAX_CALLS_PER_SEC:
+            sleep_for = (_REQUEST_TIMES_SEC[0] + 1.0) - now
+            if sleep_for > 0:
+                time.sleep(sleep_for)
+        _REQUEST_TIMES_SEC.append(time.monotonic())
+    except Exception:
+        pass
 
 
 def set_api_response_logging(enabled: bool) -> None:
@@ -101,6 +122,7 @@ class APIFootballClient:
 
         while attempt <= self.max_retries:
             try:
+                _throttle_per_second()
                 resp = self._session.request(
                     method="GET", url=url, params=norm_params, timeout=self.timeout
                 )
