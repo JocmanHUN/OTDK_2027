@@ -958,6 +958,14 @@ class AppState:
     # Odds bins window
     odds_bins_window: Any | None = None
     odds_bins_tree: ttk.Treeview | None = None
+    # Daily stats window
+    daily_stats_window: Any | None = None
+    daily_stats_tree: ttk.Treeview | None = None
+    daily_stats_info_var: tk.StringVar | None = None
+    daily_profit_fig: Any | None = None
+    daily_profit_ax: Any | None = None
+    daily_profit_canvas: Any | None = None
+    daily_side_btn: Any | None = None
 
 
 def _update_model_stats_panel(
@@ -1375,6 +1383,467 @@ def _model_odds_range_stats(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     return rows_out
 
 
+def _compute_daily_model_stats(
+    state: AppState,
+) -> tuple[list[dict[str, Any]], list[tuple[str, float, float]], float]:
+    """Aggregate finished matches per day for the selected model.
+
+    Returns (rows, cumulative_points, total_profit):
+    - rows: [{date, count, hit_rate, pos_count, neg_count, roi_pos, roi_neg, profit}]
+    - cumulative_points: list of (date, bankroll_or_profit, raw_profit) for plotting
+    - total_profit: overall profit across all counted matches
+    """
+
+    conn = getattr(state, "conn", None)
+    model_key = getattr(state, "selected_model_key", None)
+    if conn is None or model_key is None:
+        return [], [], 0.0
+
+    try:
+        search_q = state.search_var.get().strip().lower() if state.search_var is not None else ""
+    except Exception:
+        search_q = ""
+
+    use_bm = state.selected_bookmaker_id
+    exclude_ext = bool(getattr(state, "exclude_extremes", False))
+
+    # Preload odds per match (selected bookmaker or best available)
+    odds_by_match: Dict[int, Tuple[float, float, float]] = {}
+    if use_bm is None:
+        try:
+            for mid, oh, od, oa in conn.execute(
+                "SELECT match_id, MAX(odds_home), MAX(odds_draw), MAX(odds_away) FROM odds GROUP BY match_id"
+            ).fetchall():
+                try:
+                    odds_by_match[int(mid)] = (float(oh), float(od), float(oa))
+                except Exception:
+                    continue
+        except Exception:
+            odds_by_match = {}
+    else:
+        try:
+            for mid, oh, od, oa in conn.execute(
+                "SELECT match_id, odds_home, odds_draw, odds_away FROM odds WHERE bookmaker_id = ?",
+                (int(use_bm),),
+            ).fetchall():
+                try:
+                    odds_by_match[int(mid)] = (float(oh), float(od), float(oa))
+                except Exception:
+                    continue
+        except Exception:
+            odds_by_match = {}
+
+    try:
+        cur = conn.execute(
+            """
+            SELECT m.match_id, m.date, m.home_team, m.away_team, m.real_result,
+                   p.prob_home, p.prob_draw, p.prob_away, p.predicted_result
+            FROM matches m
+            JOIN predictions p ON p.match_id = m.match_id
+            WHERE m.real_result IN ('1','X','2') AND p.model_name = ?
+            ORDER BY m.date ASC
+            """,
+            (model_key,),
+        )
+        rows = cur.fetchall()
+    except Exception:
+        rows = []
+
+    daily: Dict[str, Dict[str, float | int]] = {}
+    total_profit = 0.0
+
+    for mid, date_s, home, away, rr, ph, pd, pa, pref in rows:
+        try:
+            if search_q:
+                label = f"{home} - {away}".lower()
+                if search_q not in label:
+                    continue
+            odds_trip = odds_by_match.get(int(mid))
+            if not odds_trip:
+                continue
+            oh, od, oa = odds_trip
+            phf, pdf, paf = float(ph), float(pd), float(pa)
+            pref_str = str(pref)
+            if pref_str in {"1", "X", "2"}:
+                sel = pref_str
+            else:
+                vals_sel = [("1", phf), ("X", pdf), ("2", paf)]
+                sel, _ = max(vals_sel, key=lambda x: x[1])
+            odd_val = oh if sel == "1" else (od if sel == "X" else oa)
+            if odd_val is None or float(odd_val) <= 0.0:
+                continue
+            p_sel = phf if sel == "1" else (pdf if sel == "X" else paf)
+            ev = float(p_sel) * float(odd_val) - 1.0
+            if exclude_ext and (float(odd_val) > 10.0 or abs(ev) > 2.0):
+                continue
+
+            try:
+                dt = datetime.fromisoformat(str(date_s))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                try:
+                    from zoneinfo import ZoneInfo
+
+                    dt = dt.astimezone(ZoneInfo("Europe/Budapest"))
+                except Exception:
+                    pass
+                day_key = dt.strftime("%Y-%m-%d")
+            except Exception:
+                day_key = str(date_s)[:10]
+
+            win = str(rr) == sel
+            profit = (float(odd_val) - 1.0) if win else -1.0
+            total_profit += profit
+
+            entry = daily.get(day_key)
+            if entry is None:
+                entry = {
+                    "count": 0,
+                    "wins": 0,
+                    "pos_count": 0,
+                    "neg_count": 0,
+                    "pos_profit": 0.0,
+                    "neg_profit": 0.0,
+                    "profit_all": 0.0,
+                }
+                daily[day_key] = entry
+            entry["count"] = int(entry.get("count", 0)) + 1
+            entry["wins"] = int(entry.get("wins", 0)) + (1 if win else 0)
+            entry["profit_all"] = float(entry.get("profit_all", 0.0)) + profit
+            if ev >= 0:
+                entry["pos_count"] = int(entry.get("pos_count", 0)) + 1
+                entry["pos_profit"] = float(entry.get("pos_profit", 0.0)) + profit
+            else:
+                entry["neg_count"] = int(entry.get("neg_count", 0)) + 1
+                entry["neg_profit"] = float(entry.get("neg_profit", 0.0)) + profit
+        except Exception:
+            continue
+
+    rows_out: list[dict[str, Any]] = []
+    cumulative: list[tuple[str, float, float]] = []
+    running = 0.0
+    bankroll = getattr(state, "bankroll_amount", None)
+    for day in sorted(daily.keys()):
+        d = daily[day]
+        cnt = int(d.get("count", 0) or 0)
+        wins = int(d.get("wins", 0) or 0)
+        pos_cnt = int(d.get("pos_count", 0) or 0)
+        neg_cnt = int(d.get("neg_count", 0) or 0)
+        pos_profit = float(d.get("pos_profit", 0.0) or 0.0)
+        neg_profit = float(d.get("neg_profit", 0.0) or 0.0)
+        profit_all = float(d.get("profit_all", 0.0) or 0.0)
+        hit_rate = (wins / cnt * 100.0) if cnt else None
+        roi_pos = (pos_profit / pos_cnt * 100.0) if pos_cnt else None
+        roi_neg = (neg_profit / neg_cnt * 100.0) if neg_cnt else None
+        rows_out.append(
+            {
+                "date": day,
+                "count": cnt,
+                "hit_rate": hit_rate,
+                "pos_count": pos_cnt,
+                "neg_count": neg_cnt,
+                "roi_pos": roi_pos,
+                "roi_neg": roi_neg,
+                "profit": profit_all,
+            }
+        )
+        running += profit_all
+        y_val = running + bankroll if bankroll is not None else running
+        cumulative.append((day, y_val, running))
+
+    return rows_out, cumulative, total_profit
+
+
+def _refresh_daily_stats_window(state: AppState) -> None:
+    win = getattr(state, "daily_stats_window", None)
+    tv = getattr(state, "daily_stats_tree", None)
+    if win is None or tv is None:
+        return
+
+    info_var = getattr(state, "daily_stats_info_var", None)
+    ax = getattr(state, "daily_profit_ax", None)
+    canvas = getattr(state, "daily_profit_canvas", None)
+
+    # If not in played view, clear and hint
+    if not getattr(state, "show_played", False):
+        try:
+            for i in tv.get_children():
+                tv.delete(i)
+        except Exception:
+            pass
+        if info_var is not None:
+            info_var.set("V\u00e1lts a befejezett m\u00e9rk\u0151z\u00e9sek n\u00e9zetre.")
+        if ax is not None:
+            try:
+                ax.clear()
+                ax.text(0.5, 0.5, "Nincs adat", ha="center", va="center")
+                ax.set_xticks([])
+                ax.set_yticks([])
+            except Exception:
+                pass
+        if canvas is not None:
+            try:
+                canvas.draw_idle()
+            except Exception:
+                pass
+        try:
+            if state.daily_side_btn is not None:
+                state.daily_side_btn.state(["disabled"])
+        except Exception:
+            pass
+        return
+
+    if state.selected_model_key is None:
+        try:
+            for i in tv.get_children():
+                tv.delete(i)
+        except Exception:
+            pass
+        if info_var is not None:
+            info_var.set("V\u00e1lassz modellt a napi statisztik\u00e1hoz.")
+        if ax is not None:
+            try:
+                ax.clear()
+                ax.text(0.5, 0.5, "Nincs kiv\u00e1lasztott modell", ha="center", va="center")
+                ax.set_xticks([])
+                ax.set_yticks([])
+            except Exception:
+                pass
+        if canvas is not None:
+            try:
+                canvas.draw_idle()
+            except Exception:
+                pass
+        try:
+            if state.daily_side_btn is not None:
+                state.daily_side_btn.state(["disabled"])
+        except Exception:
+            pass
+        return
+
+    rows, cumulative, total_profit = _compute_daily_model_stats(state)
+
+    # Info label
+    try:
+        model_label = MODEL_HEADERS.get(state.selected_model_key, state.selected_model_key or "-")
+        bm_label = "(legjobb)"
+        if state.selected_bookmaker_id is not None and state.bm_names_by_id:
+            bm_label = state.bm_names_by_id.get(
+                int(state.selected_bookmaker_id), str(state.selected_bookmaker_id)
+            )
+        total_matches = sum(r.get("count", 0) or 0 for r in rows)
+        if info_var is not None:
+            info_var.set(
+                f"Modell: {model_label} | Fogad\u00f3iroda: {bm_label} | Meccsek: {total_matches} | \u00d6sszprofit: {total_profit:+.2f}"
+            )
+    except Exception:
+        if info_var is not None:
+            info_var.set("Napi statisztika")
+
+    # Table
+    try:
+        for i in tv.get_children():
+            tv.delete(i)
+        for r in rows:
+            hit_str = f"{r['hit_rate']:.1f}%" if r.get("hit_rate") is not None else "-"
+            roi_pos = r.get("roi_pos")
+            roi_neg = r.get("roi_neg")
+            roi_pos_str = f"{roi_pos:+.1f}%" if roi_pos is not None else "-"
+            roi_neg_str = f"{roi_neg:+.1f}%" if roi_neg is not None else "-"
+            profit_str = f"{r.get('profit', 0.0):+.2f}"
+            tag = (
+                "roi_pos"
+                if r.get("profit", 0.0) > 0
+                else "roi_neg" if r.get("profit", 0.0) < 0 else ""
+            )
+            tv.insert(
+                "",
+                "end",
+                values=[
+                    r.get("date"),
+                    r.get("count"),
+                    hit_str,
+                    r.get("pos_count"),
+                    r.get("neg_count"),
+                    roi_pos_str,
+                    roi_neg_str,
+                    profit_str,
+                ],
+                tags=(tag,) if tag else (),
+            )
+    except Exception:
+        pass
+
+    # Chart
+    try:
+        if ax is not None:
+            ax.clear()
+            if cumulative:
+                xs = list(range(len(cumulative)))
+                ys = [p[1] for p in cumulative]
+                labels = [p[0] for p in cumulative]
+                ax.plot(xs, ys, marker="o", color="#1f77b4")
+                baseline = getattr(state, "bankroll_amount", None)
+                if baseline is not None:
+                    ax.axhline(y=baseline, color="#888888", linestyle="--", linewidth=1.0)
+                else:
+                    ax.axhline(y=0.0, color="#888888", linestyle="--", linewidth=1.0)
+                ax.set_xticks(xs)
+                ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
+                ax.set_ylabel(
+                    "Bankroll"
+                    if getattr(state, "bankroll_amount", None) is not None
+                    else "Profit (egys\u00e9g)"
+                )
+                ax.set_title("Napi profit alakul\u00e1sa")
+                ax.grid(True, linestyle=":", linewidth=0.5)
+            else:
+                ax.text(0.5, 0.5, "Nincs adat", ha="center", va="center")
+                ax.set_xticks([])
+                ax.set_yticks([])
+        try:
+            if state.daily_side_btn is not None:
+                state.daily_side_btn.state(["!disabled"])
+        except Exception:
+            pass
+    except Exception:
+        pass
+    if canvas is not None:
+        try:
+            canvas.draw_idle()
+        except Exception:
+            pass
+
+
+def _open_daily_stats_window(state: AppState) -> None:
+    if not getattr(state, "show_played", False):
+        messagebox.showinfo(
+            "Info",
+            "A napi bont\u00e1s csak a befejezett m\u00e9rk\u0151z\u00e9sek n\u00e9zetben \u00e9rhet\u0151 el.",
+        )
+        return
+    if state.selected_model_key is None:
+        messagebox.showinfo("Info", "V\u00e1lassz egy modellt a napi statisztik\u00e1hoz.")
+        return
+
+    win = getattr(state, "daily_stats_window", None)
+    try:
+        if win is not None:
+            try:
+                if not win.winfo_exists():
+                    win = None
+            except Exception:
+                win = None
+    except Exception:
+        win = None
+
+    if win is None:
+        win = tk.Toplevel()
+        win.title("Napi statisztika")
+        win.geometry("950x520")
+
+        info_var = tk.StringVar(value="Napi statisztika")
+        state.daily_stats_info_var = info_var
+        ttk.Label(win, textvariable=info_var, anchor="w").grid(
+            row=0, column=0, columnspan=2, sticky="we", padx=6, pady=(6, 4)
+        )
+
+        # Table
+        cols = (
+            "D\u00e1tum",
+            "Meccs",
+            "Tal\u00e1lati ar\u00e1ny",
+            "+EV db",
+            "-EV db",
+            "ROI +EV",
+            "ROI -EV",
+            "Napi profit",
+        )
+        tv = ttk.Treeview(win, columns=cols, show="headings", height=12)
+        widths = {
+            "D\u00e1tum": 100,
+            "Meccs": 70,
+            "Tal\u00e1lati ar\u00e1ny": 110,
+            "+EV db": 70,
+            "-EV db": 70,
+            "ROI +EV": 90,
+            "ROI -EV": 90,
+            "Napi profit": 100,
+        }
+        for c in cols:
+            tv.heading(c, text=c)
+            tv.column(c, width=widths.get(c, 100), anchor=("w" if c == "D\u00e1tum" else "center"))
+        vsb = ttk.Scrollbar(win, orient="vertical", command=tv.yview)
+        tv.configure(yscrollcommand=vsb.set)
+        tv.grid(row=1, column=0, sticky="nsew", padx=(6, 0), pady=(0, 6))
+        vsb.grid(row=1, column=1, sticky="ns", pady=(0, 6))
+        try:
+            tv.tag_configure("roi_pos", foreground="#006400")
+            tv.tag_configure("roi_neg", foreground="#8b0000")
+        except Exception:
+            pass
+        state.daily_stats_tree = tv
+
+        # Chart
+        chart_frame = ttk.Frame(win)
+        chart_frame.grid(row=2, column=0, columnspan=2, sticky="nsew", padx=6, pady=(0, 6))
+        try:
+            from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+            from matplotlib.figure import Figure
+
+            fig = Figure(figsize=(7.5, 2.8), dpi=100)
+            ax = fig.add_subplot(111)
+            canvas = FigureCanvasTkAgg(fig, master=chart_frame)
+            canvas_widget = canvas.get_tk_widget()
+            canvas_widget.pack(fill="both", expand=True)
+            state.daily_profit_fig = fig
+            state.daily_profit_ax = ax
+            state.daily_profit_canvas = canvas
+        except Exception:
+            state.daily_profit_fig = None
+            state.daily_profit_ax = None
+            state.daily_profit_canvas = None
+            ttk.Label(chart_frame, text="A grafikonhoz nem \u00e9rhet\u0151 el a matplotlib.").pack(
+                anchor="w", padx=4, pady=4
+            )
+
+        # Refresh button
+        btn_bar = ttk.Frame(win)
+        btn_bar.grid(row=3, column=0, columnspan=2, sticky="we", padx=6, pady=(0, 8))
+        ttk.Button(
+            btn_bar, text="Friss\u00edt\u00e9s", command=lambda: _refresh_daily_stats_window(state)
+        ).pack(side=tk.LEFT)
+
+        def _on_close() -> None:
+            try:
+                win.destroy()
+            finally:
+                state.daily_stats_window = None
+                state.daily_stats_tree = None
+                state.daily_profit_fig = None
+                state.daily_profit_ax = None
+                state.daily_profit_canvas = None
+                state.daily_stats_info_var = None
+
+        try:
+            win.protocol("WM_DELETE_WINDOW", _on_close)
+        except Exception:
+            pass
+
+        win.grid_rowconfigure(1, weight=1)
+        win.grid_rowconfigure(2, weight=1)
+        win.grid_columnconfigure(0, weight=1)
+        state.daily_stats_window = win
+
+    _refresh_daily_stats_window(state)
+    try:
+        win.deiconify()
+        win.lift()
+        win.focus_force()
+    except Exception:
+        pass
+
+
 def _refresh_odds_bins_window(state: AppState) -> None:
     try:
         tv = getattr(state, "odds_bins_tree", None)
@@ -1781,6 +2250,10 @@ def refresh_table(state: AppState, *, allow_network: bool = True) -> None:
     # Update stats side panel if applicable
     try:
         _update_model_stats_panel(state, filtered, preds_by_match)
+    except Exception:
+        pass
+    try:
+        _refresh_daily_stats_window(state)
     except Exception:
         pass
 
@@ -2575,6 +3048,19 @@ def run_app() -> None:
         except Exception:
             state.exclude_extremes = False
             state.exclude_extremes_var = None
+        # Quick access button for daily stats (placed in stats panel)
+        try:
+            daily_side_btn = ttk.Button(
+                stats_frame,
+                text="Napi statisztika",
+                command=lambda: _open_daily_stats_window(state),
+            )
+            daily_side_btn.grid(
+                row=len(labels) + 3, column=0, columnspan=2, sticky="w", padx=6, pady=(0, 6)
+            )
+            state.daily_side_btn = daily_side_btn
+        except Exception:
+            state.daily_side_btn = None
         # Hide by default until a model is selected in played view
         try:
             stats_frame.grid_remove()
@@ -2686,6 +3172,26 @@ def run_app() -> None:
         except Exception:
             pass
 
+    def _update_daily_btn_state() -> None:
+        try:
+            has_model = state.selected_model_key is not None
+            if getattr(state, "show_played", False) and has_model:
+                daily_btn.state(["!disabled"])
+                try:
+                    if state.daily_side_btn is not None:
+                        state.daily_side_btn.state(["!disabled"])
+                except Exception:
+                    pass
+            else:
+                daily_btn.state(["disabled"])
+                try:
+                    if state.daily_side_btn is not None:
+                        state.daily_side_btn.state(["disabled"])
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     def _on_toggle_played() -> None:
         try:
             state.show_played = not bool(getattr(state, "show_played", False))
@@ -2696,6 +3202,7 @@ def run_app() -> None:
             except Exception:
                 pass
             _update_played_btn_label()
+            _update_daily_btn_state()
             refresh_table(state, allow_network=False)
         except Exception:
             pass
@@ -2705,6 +3212,12 @@ def run_app() -> None:
     )
     played_btn.pack(side=tk.LEFT, padx=(0, 12))
     _update_played_btn_label()
+
+    daily_btn = ttk.Button(
+        btn_frame, text="Napi statisztika", command=lambda: _open_daily_stats_window(state)
+    )
+    daily_btn.pack(side=tk.LEFT, padx=(0, 12))
+    _update_daily_btn_state()
 
     # Winners-only checkbox (visible only for played view with a selected model)
     winners_var = tk.BooleanVar(value=False)
@@ -2763,6 +3276,10 @@ def run_app() -> None:
         except Exception:
             pass
         refresh_table(state, allow_network=False)
+        try:
+            _refresh_daily_stats_window(state)
+        except Exception:
+            pass
 
     if state.bankroll_var is not None:
         state.bankroll_var.trace_add("write", _on_bankroll_change)
@@ -2898,6 +3415,10 @@ def run_app() -> None:
             _apply_displaycolumns()
             try:
                 _update_winners_filter_visibility()
+            except Exception:
+                pass
+            try:
+                _update_daily_btn_state()
             except Exception:
                 pass
             refresh_table(state, allow_network=False)
