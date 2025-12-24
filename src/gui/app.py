@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from functools import partial
 from pathlib import Path
 from tkinter import messagebox, ttk
-from typing import Any, Dict, List, Literal, Mapping, Tuple, cast
+from typing import Any, Callable, Dict, List, Literal, Mapping, Tuple, cast
 
 from src.application.services.export_logging import log_features_csv, log_odds_csv
 from src.application.services.fixtures_service import FixturesService
@@ -84,6 +84,21 @@ def _load_xg_leagues() -> List[Mapping[str, Any]]:
             }
         )
     return cleaned
+
+
+_XG_LEAGUE_MAP: Dict[int, Mapping[str, Any]] | None = None
+
+
+def _get_xg_league_map() -> Dict[int, Mapping[str, Any]]:
+    global _XG_LEAGUE_MAP
+    if _XG_LEAGUE_MAP is None:
+        try:
+            _XG_LEAGUE_MAP = {
+                int(row["league_id"]): row for row in _load_xg_leagues() if "league_id" in row
+            }
+        except Exception:
+            _XG_LEAGUE_MAP = {}
+    return _XG_LEAGUE_MAP or {}
 
 
 # ---------------------------- UI helpers ----------------------------
@@ -980,6 +995,16 @@ class AppState:
     daily_top_n_var: tk.StringVar | None = None
     daily_ev_range_var: tk.StringVar | None = None
     daily_odds_range_var: tk.StringVar | None = None
+    league_stats_window: Any | None = None
+    league_stats_tree: ttk.Treeview | None = None
+    league_stats_info_var: tk.StringVar | None = None
+    league_top_n_var: tk.StringVar | None = None
+    league_ev_range_var: tk.StringVar | None = None
+    league_odds_range_var: tk.StringVar | None = None
+    league_search_var: tk.StringVar | None = None
+    league_side_btn: Any | None = None
+    league_sort_col: str | None = None
+    league_sort_reverse: bool = False
 
 
 def _update_model_stats_panel(
@@ -1308,6 +1333,104 @@ def _ev_bin_label(ev: float) -> str:
         if ev >= low and (idx == len(EV_BINS) - 1 or ev < high):
             return label
     return EV_BINS[-1][0]
+
+
+def _format_bin_summary(
+    counts: Mapping[str, int], ordered_labels: list[str], *, max_parts: int = 4
+) -> str:
+    try:
+        order_map = {lbl: i for i, lbl in enumerate(ordered_labels)}
+        items = [(lbl, int(counts.get(lbl, 0) or 0)) for lbl in ordered_labels]
+        items = [(lbl, cnt) for lbl, cnt in items if cnt > 0]
+        if not items:
+            return "-"
+        items.sort(key=lambda x: (-x[1], order_map.get(x[0], 0)))
+        head = items[:max_parts]
+        rest_total = sum(cnt for _, cnt in items[len(head) :])
+        parts = [f"{lbl}: {cnt}" for lbl, cnt in head]
+        if rest_total > 0:
+            parts.append(f"+{rest_total} egy\u00e9b")
+        return " | ".join(parts)
+    except Exception:
+        return "-"
+
+
+def _league_sort_key(sort_col: str) -> Callable[[dict[str, Any]], float | str] | None:
+    """Return a sortable key function for league rows based on the selected column."""
+
+    def _to_float(value: Any) -> float:
+        try:
+            return float(value)
+        except Exception:
+            return 0.0
+
+    if sort_col == "Liga":
+
+        def _by_league(r: dict[str, Any]) -> str:
+            return str(r.get("league_label", ""))
+
+        return _by_league
+    if sort_col == "Tipp db":
+
+        def _by_count(r: dict[str, Any]) -> float:
+            return _to_float(int(r.get("count", 0) or 0))
+
+        return _by_count
+    if sort_col == "Tal\u00e1lati ar\u00e1ny":
+
+        def _by_hit(r: dict[str, Any]) -> float:
+            return _to_float(r.get("hit_rate", 0.0) or 0.0)
+
+        return _by_hit
+    if sort_col == "\u00c1tlag EV":
+
+        def _by_avg_ev(r: dict[str, Any]) -> float:
+            return _to_float((r.get("avg_ev", 0.0) or 0.0) * 100.0)
+
+        return _by_avg_ev
+    if sort_col == "+EV db":
+
+        def _by_pos_count(r: dict[str, Any]) -> float:
+            return _to_float(int(r.get("pos_count", 0) or 0))
+
+        return _by_pos_count
+    if sort_col == "-EV db":
+
+        def _by_neg_count(r: dict[str, Any]) -> float:
+            return _to_float(int(r.get("neg_count", 0) or 0))
+
+        return _by_neg_count
+    if sort_col == "ROI +EV":
+
+        def _by_roi_pos(r: dict[str, Any]) -> float:
+            return _to_float(r.get("roi_pos", 0.0) or 0.0)
+
+        return _by_roi_pos
+    if sort_col == "ROI -EV":
+
+        def _by_roi_neg(r: dict[str, Any]) -> float:
+            return _to_float(r.get("roi_neg", 0.0) or 0.0)
+
+        return _by_roi_neg
+    if sort_col == "Sz\u00f3r\u00e1s":
+
+        def _by_std(r: dict[str, Any]) -> float:
+            return _to_float(r.get("std", 0.0) or 0.0)
+
+        return _by_std
+    if sort_col == "Max DD":
+
+        def _by_dd(r: dict[str, Any]) -> float:
+            return _to_float(r.get("max_dd", 0.0) or 0.0)
+
+        return _by_dd
+    if sort_col == "Profit":
+
+        def _by_profit(r: dict[str, Any]) -> float:
+            return _to_float(r.get("profit", 0.0) or 0.0)
+
+        return _by_profit
+    return None
 
 
 def _model_odds_range_stats(conn: sqlite3.Connection) -> list[dict[str, Any]]:
@@ -1649,6 +1772,320 @@ def _compute_daily_model_stats(
     risk = {"std": std_val, "max_drawdown": max_dd if daily_profit_list else None}
 
     return rows_out, cumulative, total_profit, risk
+
+
+def _compute_league_stats(
+    state: AppState,
+) -> tuple[list[dict[str, Any]], dict[str, float | int | None]]:
+    conn = getattr(state, "conn", None)
+    model_key = getattr(state, "selected_model_key", None)
+    if conn is None or model_key is None:
+        return [], {"total_matches": 0, "total_profit": 0.0, "std": None, "max_drawdown": None}
+
+    try:
+        search_q = (
+            state.league_search_var.get().strip().lower()
+            if state.league_search_var is not None
+            else ""
+        )
+    except Exception:
+        search_q = ""
+
+    use_bm = state.selected_bookmaker_id
+    exclude_ext = bool(getattr(state, "exclude_extremes", False))
+
+    top_n_var = getattr(state, "league_top_n_var", None)
+    top_raw = top_n_var.get().strip() if top_n_var is not None else "0"
+    try:
+        top_n = 0 if top_raw == "-" else max(0, int(top_raw))
+    except Exception:
+        top_n = 0
+
+    ev_range_var = getattr(state, "league_ev_range_var", None)
+    ev_label = ev_range_var.get().strip() if ev_range_var is not None else "-"
+    ev_range_map = {label: (low, high) for (label, low, high) in EV_BINS}
+    ev_bounds: tuple[float, float] | None = ev_range_map.get(ev_label)
+
+    odds_range_var = getattr(state, "league_odds_range_var", None)
+    odds_label = odds_range_var.get().strip() if odds_range_var is not None else "-"
+    odds_range_map = {label: (low, high) for (label, low, high) in ODDS_BINS}
+    odds_bounds: tuple[float | None, float | None] | None = odds_range_map.get(odds_label)
+
+    odds_by_match: Dict[int, Tuple[float, float, float]] = {}
+    if use_bm is None:
+        try:
+            for mid, oh, od, oa in conn.execute(
+                "SELECT match_id, MAX(odds_home), MAX(odds_draw), MAX(odds_away) FROM odds GROUP BY match_id"
+            ).fetchall():
+                try:
+                    odds_by_match[int(mid)] = (float(oh), float(od), float(oa))
+                except Exception:
+                    continue
+        except Exception:
+            odds_by_match = {}
+    else:
+        try:
+            for mid, oh, od, oa in conn.execute(
+                "SELECT match_id, odds_home, odds_draw, odds_away FROM odds WHERE bookmaker_id = ?",
+                (int(use_bm),),
+            ).fetchall():
+                try:
+                    odds_by_match[int(mid)] = (float(oh), float(od), float(oa))
+                except Exception:
+                    continue
+        except Exception:
+            odds_by_match = {}
+
+    try:
+        cur = conn.execute(
+            """
+            SELECT m.match_id,
+                   m.date,
+                   m.home_team,
+                   m.away_team,
+                   m.real_result,
+                   m.league_id,
+                   l.name,
+                   l.country,
+                   p.prob_home,
+                   p.prob_draw,
+                   p.prob_away,
+                   p.predicted_result
+            FROM matches m
+            JOIN predictions p ON p.match_id = m.match_id
+            LEFT JOIN leagues l ON l.league_id = m.league_id
+            WHERE m.real_result IN ('1','X','2') AND p.model_name = ?
+            ORDER BY m.date ASC
+            """,
+            (model_key,),
+        )
+        rows = cur.fetchall()
+    except Exception:
+        rows = []
+
+    xg_map = _get_xg_league_map()
+
+    leagues: Dict[int, dict[str, Any]] = {}
+    for mid, date_s, home, away, rr, lid, lname, lcountry, ph, pd, pa, pref in rows:
+        try:
+            lid_int = _maybe_int(lid)
+            if lid_int is None:
+                continue
+            odds_trip = odds_by_match.get(int(mid))
+            if not odds_trip:
+                continue
+            oh, od, oa = odds_trip
+            phf, pdf, paf = float(ph), float(pd), float(pa)
+            pref_str = str(pref)
+            if pref_str in {"1", "X", "2"}:
+                sel = pref_str
+            else:
+                vals_sel = [("1", phf), ("X", pdf), ("2", paf)]
+                sel, _ = max(vals_sel, key=lambda x: x[1])
+            odd_val = oh if sel == "1" else (od if sel == "X" else oa)
+            if odd_val is None or float(odd_val) <= 0.0:
+                continue
+            if odds_bounds is not None:
+                low_o, high_o = odds_bounds
+                ov = float(odd_val)
+                if (low_o is not None and ov < low_o) or (high_o is not None and ov > high_o):
+                    continue
+            p_sel = phf if sel == "1" else (pdf if sel == "X" else paf)
+            ev = float(p_sel) * float(odd_val) - 1.0
+            if exclude_ext and (float(odd_val) > 10.0 or abs(ev) > 2.0):
+                continue
+            if ev_bounds is not None:
+                low_b, high_b = ev_bounds
+                if not (ev >= low_b and (ev < high_b or high_b == float("inf"))):
+                    continue
+            # Prefer the JSON (xG) league names for display, fall back to DB
+            league_meta = xg_map.get(int(lid_int), {})
+            league_name = None
+            try:
+                cand = league_meta.get("league_name")
+                if isinstance(cand, str) and cand.strip():
+                    league_name = cand.strip()
+            except Exception:
+                league_name = None
+            if not league_name and isinstance(lname, str) and lname.strip():
+                league_name = lname.strip()
+            if not league_name:
+                league_name = f"Liga {lid_int}"
+
+            country_val = None
+            try:
+                cjson = league_meta.get("country_name")
+                if isinstance(cjson, str) and cjson.strip():
+                    country_val = cjson.strip()
+            except Exception:
+                country_val = None
+            if not country_val and isinstance(lcountry, str) and lcountry.strip():
+                country_val = lcountry.strip()
+
+            league_label = f"{league_name} ({country_val})" if country_val else league_name
+            dt_ts = None
+            try:
+                if isinstance(date_s, str):
+                    dt_obj = datetime.fromisoformat(str(date_s))
+                else:
+                    dt_obj = datetime.fromisoformat(str(date_s))
+                if dt_obj.tzinfo is None:
+                    dt_obj = dt_obj.replace(tzinfo=timezone.utc)
+                dt_ts = dt_obj.timestamp()
+            except Exception:
+                dt_ts = None
+
+            if search_q and search_q not in league_label.lower():
+                continue
+
+            win = str(rr) == sel
+            profit = (float(odd_val) - 1.0) if win else -1.0
+            odds_bucket = _odds_bin_label(float(odd_val))
+            ev_bucket = _ev_bin_label(ev)
+
+            bucket = leagues.get(int(lid_int))
+            if bucket is None:
+                bucket = {"label": league_label, "matches": []}
+                leagues[int(lid_int)] = bucket
+            bucket["matches"].append(
+                {
+                    "ev": ev,
+                    "win": win,
+                    "profit": profit,
+                    "odds_bin": odds_bucket,
+                    "ev_bin": ev_bucket,
+                    "ts": dt_ts,
+                    "mid": int(mid),
+                }
+            )
+        except Exception:
+            continue
+
+    rows_out: list[dict[str, Any]] = []
+    profits_per_league: list[float] = []
+    total_matches = 0
+    total_profit = 0.0
+    odds_labels = [label for (label, _lo, _hi) in ODDS_BINS]
+    ev_labels = [label for (label, _lo, _hi) in EV_BINS]
+
+    for lid, data in leagues.items():
+        matches = data.get("matches", [])
+        if not isinstance(matches, list):
+            continue
+        if top_n > 0:
+            positives = [m for m in matches if m.get("ev", 0.0) >= 0]
+            positives.sort(key=lambda x: float(x.get("ev", 0.0)), reverse=True)
+            selected = positives[:top_n]
+        else:
+            selected = matches
+        cnt = len(selected)
+        if cnt == 0:
+            continue
+
+        wins = sum(1 for m in selected if m.get("win"))
+        avg_ev = sum(float(m.get("ev", 0.0)) for m in selected) / cnt if cnt else None
+        pos_matches = [m for m in selected if m.get("ev", 0.0) >= 0]
+        neg_matches = [m for m in selected if m.get("ev", 0.0) < 0]
+        pos_cnt = len(pos_matches)
+        neg_cnt = len(neg_matches)
+        pos_profit = sum(float(m.get("profit", 0.0)) for m in pos_matches)
+        neg_profit = sum(float(m.get("profit", 0.0)) for m in neg_matches)
+        profit_sum = sum(float(m.get("profit", 0.0)) for m in selected)
+        hit_rate = (wins / cnt * 100.0) if cnt else None
+        roi_pos = (pos_profit / pos_cnt * 100.0) if pos_cnt else None
+        roi_neg = (neg_profit / neg_cnt * 100.0) if neg_cnt else None
+
+        odds_counts = {lbl: 0 for lbl in odds_labels}
+        ev_counts = {lbl: 0 for lbl in ev_labels}
+        for m in selected:
+            ob = m.get("odds_bin")
+            eb = m.get("ev_bin")
+            if isinstance(ob, str) and ob in odds_counts:
+                odds_counts[ob] += 1
+            if isinstance(eb, str) and eb in ev_counts:
+                ev_counts[eb] += 1
+
+        # Risk metrics per league
+        profits_list = [float(m.get("profit", 0.0)) for m in selected]
+        std_l = None
+        if len(profits_list) >= 2:
+            mean_l = sum(profits_list) / len(profits_list)
+            var_l = sum((p - mean_l) ** 2 for p in profits_list) / (len(profits_list) - 1)
+            std_l = math.sqrt(var_l)
+
+        max_dd_l = 0.0
+        try:
+            # Aggregate profits by timestamp to make DD order-invariant for simultaneous matches
+            blocks: Dict[float, float] = {}
+            for m in selected:
+                ts_val = m.get("ts")
+                mid_val = m.get("mid")
+                try:
+                    ts_key = float(ts_val) if ts_val is not None else float(mid_val or 0)
+                except Exception:
+                    ts_key = 0.0
+                blocks[ts_key] = blocks.get(ts_key, 0.0) + float(m.get("profit", 0.0))
+            running_l = 0.0
+            peak_l = 0.0
+            for ts_key in sorted(blocks.keys()):
+                running_l += blocks[ts_key]
+                if running_l > peak_l:
+                    peak_l = running_l
+                dd_now = running_l - peak_l
+                if dd_now < max_dd_l:
+                    max_dd_l = dd_now
+        except Exception:
+            max_dd_l = 0.0
+
+        rows_out.append(
+            {
+                "league_label": data.get("label", str(lid)),
+                "count": cnt,
+                "hit_rate": hit_rate,
+                "avg_ev": avg_ev,
+                "pos_count": pos_cnt,
+                "neg_count": neg_cnt,
+                "roi_pos": roi_pos,
+                "roi_neg": roi_neg,
+                "profit": profit_sum,
+                "odds_summary": _format_bin_summary(odds_counts, odds_labels),
+                "ev_summary": _format_bin_summary(ev_counts, ev_labels),
+                "std": std_l,
+                "max_dd": max_dd_l if profits_list else None,
+            }
+        )
+        total_matches += cnt
+        total_profit += profit_sum
+        profits_per_league.append(profit_sum)
+
+    rows_out.sort(key=lambda r: float(r.get("profit", 0.0)), reverse=True)
+
+    std_val = None
+    if len(profits_per_league) >= 2:
+        mean_val = sum(profits_per_league) / len(profits_per_league)
+        variance = sum((p - mean_val) ** 2 for p in profits_per_league) / (
+            len(profits_per_league) - 1
+        )
+        std_val = math.sqrt(variance)
+
+    max_dd = 0.0
+    running = 0.0
+    peak = 0.0
+    for profit in [p for _lbl, p in sorted(zip(leagues.keys(), profits_per_league))]:
+        running += profit
+        if running > peak:
+            peak = running
+        dd_now = running - peak
+        if dd_now < max_dd:
+            max_dd = dd_now
+
+    summary = {
+        "total_matches": total_matches,
+        "total_profit": total_profit,
+        "std": std_val,
+        "max_drawdown": max_dd if profits_per_league else None,
+    }
+    return rows_out, summary
 
 
 def _refresh_daily_stats_window(state: AppState) -> None:
@@ -2018,6 +2455,268 @@ def _open_daily_stats_window(state: AppState) -> None:
         state.daily_stats_window = win
 
     _refresh_daily_stats_window(state)
+    try:
+        win.deiconify()
+        win.lift()
+        win.focus_force()
+    except Exception:
+        pass
+
+
+def _refresh_league_stats_window(state: AppState) -> None:
+    win = getattr(state, "league_stats_window", None)
+    tv = getattr(state, "league_stats_tree", None)
+    if win is None or tv is None:
+        return
+
+    info_var = getattr(state, "league_stats_info_var", None)
+
+    if not getattr(state, "show_played", False):
+        try:
+            for i in tv.get_children():
+                tv.delete(i)
+        except Exception:
+            pass
+        if info_var is not None:
+            info_var.set("V\u00e1lts a befejezett m\u00e9rk\u0151z\u00e9sek n\u00e9zetre.")
+        return
+    if state.selected_model_key is None:
+        try:
+            for i in tv.get_children():
+                tv.delete(i)
+        except Exception:
+            pass
+        if info_var is not None:
+            info_var.set("V\u00e1lassz modellt a liga statisztik\u00e1khoz.")
+        return
+
+    rows, summary = _compute_league_stats(state)
+    model_label = MODEL_HEADERS.get(state.selected_model_key, state.selected_model_key or "-")
+    total_matches = int(summary.get("total_matches", 0) or 0)
+    total_profit = float(summary.get("total_profit", 0.0) or 0.0)
+    std_val = summary.get("std")
+    dd_val = summary.get("max_drawdown")
+    std_str = f"{std_val:.2f}" if std_val is not None else "-"
+    dd_str = f"{dd_val:.2f}" if dd_val is not None else "-"
+    if info_var is not None:
+        info_var.set(
+            f"Modell: {model_label} | \u00d6sszes meccs: {total_matches} | \u00d6sszprofit: {total_profit:+.2f} | Sz\u00f3r\u00e1s (liga profit): {std_str} | Max DD: {dd_str}"
+        )
+
+    sort_col = getattr(state, "league_sort_col", None)
+    sort_rev = bool(getattr(state, "league_sort_reverse", False))
+    if sort_col:
+        key_fn = _league_sort_key(sort_col)
+        if key_fn is not None:
+            try:
+                rows = sorted(rows, key=key_fn, reverse=sort_rev)
+            except Exception:
+                pass
+
+    try:
+        for i in tv.get_children():
+            tv.delete(i)
+        for r in rows:
+            hit_str = f"{r.get('hit_rate', 0.0):.1f}%" if r.get("hit_rate") is not None else "-"
+            avg_ev = r.get("avg_ev")
+            avg_ev_str = f"{avg_ev * 100.0:+.1f}%" if avg_ev is not None else "-"
+            roi_pos = r.get("roi_pos")
+            roi_neg = r.get("roi_neg")
+            roi_pos_str = f"{roi_pos:+.1f}%" if roi_pos is not None else "-"
+            roi_neg_str = f"{roi_neg:+.1f}%" if roi_neg is not None else "-"
+            profit_val = float(r.get("profit", 0.0) or 0.0)
+            profit_str = f"{profit_val:+.2f}"
+            std_val = r.get("std")
+            std_str = f"{std_val:.2f}" if std_val is not None else "-"
+            dd_val = r.get("max_dd")
+            dd_str = f"{dd_val:.2f}" if dd_val is not None else "-"
+            tag = "roi_pos" if profit_val > 0 else "roi_neg" if profit_val < 0 else ""
+            tv.insert(
+                "",
+                "end",
+                values=[
+                    r.get("league_label", "-"),
+                    r.get("count"),
+                    hit_str,
+                    avg_ev_str,
+                    r.get("pos_count"),
+                    r.get("neg_count"),
+                    roi_pos_str,
+                    roi_neg_str,
+                    std_str,
+                    dd_str,
+                    profit_str,
+                ],
+                tags=(tag,) if tag else (),
+            )
+    except Exception:
+        pass
+
+
+def _open_league_stats_window(state: AppState) -> None:
+    if not getattr(state, "show_played", False):
+        messagebox.showinfo(
+            "Info",
+            "A liga statisztik\u00e1k csak a befejezett m\u00e9rk\u0151z\u00e9sek n\u00e9zetben \u00e9rhet\u0151k el.",
+        )
+        return
+    if state.selected_model_key is None:
+        messagebox.showinfo("Info", "V\u00e1lassz egy modellt a liga statisztik\u00e1khoz.")
+        return
+
+    win = getattr(state, "league_stats_window", None)
+    try:
+        if win is not None:
+            try:
+                if not win.winfo_exists():
+                    win = None
+            except Exception:
+                win = None
+    except Exception:
+        win = None
+
+    if win is None:
+        win = tk.Toplevel()
+        win.title("Liga statisztik\u00e1k")
+        win.geometry("1150x560")
+
+        info_var = tk.StringVar(value="Liga statisztik\u00e1k")
+        state.league_stats_info_var = info_var
+        ttk.Label(win, textvariable=info_var, anchor="w").grid(
+            row=0, column=0, columnspan=2, sticky="we", padx=6, pady=(6, 4)
+        )
+
+        # Filters
+        filter_frame = ttk.Frame(win)
+        filter_frame.grid(row=1, column=0, columnspan=2, sticky="we", padx=6, pady=(0, 4))
+        filter_frame.grid_columnconfigure(5, weight=1)
+
+        ttk.Label(filter_frame, text="Liga keres\u00e9s:").grid(row=0, column=0, sticky="w")
+        league_search_var = tk.StringVar(value="")
+        state.league_search_var = league_search_var
+        search_entry = ttk.Entry(filter_frame, width=26, textvariable=league_search_var)
+        search_entry.grid(row=0, column=1, sticky="w", padx=(4, 12))
+        league_search_var.trace_add("write", lambda *_a: _refresh_league_stats_window(state))
+
+        ttk.Label(filter_frame, text="Top +EV:").grid(row=0, column=2, sticky="w")
+        top_n_var = tk.StringVar(value="-")
+        state.league_top_n_var = top_n_var
+        top_combo = ttk.Combobox(
+            filter_frame,
+            textvariable=top_n_var,
+            values=["-", "3", "5", "10"],
+            state="readonly",
+            width=6,
+        )
+        top_combo.grid(row=0, column=3, sticky="w", padx=(4, 12))
+        top_combo.bind("<<ComboboxSelected>>", lambda _e: _refresh_league_stats_window(state))
+
+        ttk.Label(filter_frame, text="EV tartom\u00e1ny:").grid(row=0, column=4, sticky="w")
+        ev_var = tk.StringVar(value="-")
+        state.league_ev_range_var = ev_var
+        ev_options = ["-"] + [lbl for (lbl, _lo, _hi) in EV_BINS]
+        ev_combo = ttk.Combobox(
+            filter_frame, textvariable=ev_var, values=ev_options, state="readonly", width=18
+        )
+        ev_combo.grid(row=0, column=5, sticky="w", padx=(4, 12))
+        ev_combo.bind("<<ComboboxSelected>>", lambda _e: _refresh_league_stats_window(state))
+
+        ttk.Label(filter_frame, text="Odds tartom\u00e1ny:").grid(row=0, column=6, sticky="w")
+        odds_var = tk.StringVar(value="-")
+        state.league_odds_range_var = odds_var
+        odds_options = ["-"] + [lbl for (lbl, _lo, _hi) in ODDS_BINS]
+        odds_combo = ttk.Combobox(
+            filter_frame, textvariable=odds_var, values=odds_options, state="readonly", width=18
+        )
+        odds_combo.grid(row=0, column=7, sticky="w")
+        odds_combo.bind("<<ComboboxSelected>>", lambda _e: _refresh_league_stats_window(state))
+
+        # Table
+        cols = (
+            "Liga",
+            "Tipp db",
+            "Tal\u00e1lati ar\u00e1ny",
+            "\u00c1tlag EV",
+            "+EV db",
+            "-EV db",
+            "ROI +EV",
+            "ROI -EV",
+            "Sz\u00f3r\u00e1s",
+            "Max DD",
+            "Profit",
+        )
+        tv = ttk.Treeview(win, columns=cols, show="headings", height=16)
+        state.league_sort_col = "Profit"
+        state.league_sort_reverse = True
+
+        def _set_league_sort(col: str) -> None:
+            try:
+                if state.league_sort_col == col:
+                    state.league_sort_reverse = not bool(state.league_sort_reverse)
+                else:
+                    state.league_sort_col = col
+                    state.league_sort_reverse = False if col == "Liga" else True
+                _refresh_league_stats_window(state)
+            except Exception:
+                pass
+
+        widths = {
+            "Liga": 200,
+            "Tipp db": 80,
+            "Tal\u00e1lati ar\u00e1ny": 110,
+            "\u00c1tlag EV": 90,
+            "+EV db": 70,
+            "-EV db": 70,
+            "ROI +EV": 90,
+            "ROI -EV": 90,
+            "Sz\u00f3r\u00e1s": 90,
+            "Max DD": 90,
+            "Profit": 90,
+        }
+        for c in cols:
+            tv.heading(c, text=c, command=partial(_set_league_sort, c))
+            anchor_val: Literal["center", "w"] = "w" if c == "Liga" else "center"
+            tv.column(c, width=widths.get(c, 100), anchor=anchor_val, stretch=False)
+        vsb = ttk.Scrollbar(win, orient="vertical", command=tv.yview)
+        tv.configure(yscrollcommand=vsb.set)
+        tv.grid(row=2, column=0, sticky="nsew", padx=(6, 0), pady=(0, 6))
+        vsb.grid(row=2, column=1, sticky="ns", pady=(0, 6))
+        try:
+            tv.tag_configure("roi_pos", foreground="#006400")
+            tv.tag_configure("roi_neg", foreground="#8b0000")
+        except Exception:
+            pass
+        state.league_stats_tree = tv
+
+        # Refresh button
+        btn_bar = ttk.Frame(win)
+        btn_bar.grid(row=3, column=0, columnspan=2, sticky="we", padx=6, pady=(0, 8))
+        ttk.Button(
+            btn_bar, text="Friss\u00edt\u00e9s", command=lambda: _refresh_league_stats_window(state)
+        ).pack(side=tk.LEFT)
+
+        def _on_close() -> None:
+            try:
+                win.destroy()
+            finally:
+                state.league_stats_window = None
+                state.league_stats_tree = None
+                state.league_stats_info_var = None
+                state.league_top_n_var = None
+                state.league_ev_range_var = None
+                state.league_odds_range_var = None
+                state.league_search_var = None
+
+        try:
+            win.protocol("WM_DELETE_WINDOW", _on_close)
+        except Exception:
+            pass
+
+        win.grid_rowconfigure(2, weight=1)
+        win.grid_columnconfigure(0, weight=1)
+        state.league_stats_window = win
+
+    _refresh_league_stats_window(state)
     try:
         win.deiconify()
         win.lift()
@@ -2411,6 +3110,10 @@ def refresh_table(state: AppState, *, allow_network: bool = True) -> None:
         pass
     try:
         _refresh_daily_stats_window(state)
+    except Exception:
+        pass
+    try:
+        _refresh_league_stats_window(state)
     except Exception:
         pass
 
@@ -3232,19 +3935,29 @@ def run_app() -> None:
         except Exception:
             state.exclude_extremes = False
             state.exclude_extremes_var = None
-        # Quick access button for daily stats (placed in stats panel)
+        # Quick access buttons (placed under EV stat tables)
         try:
+            btn_row = ttk.Frame(stats_frame)
+            btn_row.grid(
+                row=len(labels) + 4, column=0, columnspan=2, sticky="w", padx=6, pady=(0, 6)
+            )
             daily_side_btn = ttk.Button(
-                stats_frame,
+                btn_row,
                 text="Napi statisztika",
                 command=lambda: _open_daily_stats_window(state),
             )
-            daily_side_btn.grid(
-                row=len(labels) + 4, column=0, columnspan=2, sticky="w", padx=6, pady=(0, 6)
-            )
+            daily_side_btn.pack(side=tk.LEFT, padx=(0, 6))
             state.daily_side_btn = daily_side_btn
+            league_side_btn = ttk.Button(
+                btn_row,
+                text="Liga statisztik\u00e1k",
+                command=lambda: _open_league_stats_window(state),
+            )
+            league_side_btn.pack(side=tk.LEFT)
+            state.league_side_btn = league_side_btn
         except Exception:
             state.daily_side_btn = None
+            state.league_side_btn = None
         # Hide by default until a model is selected in played view
         try:
             stats_frame.grid_remove()
@@ -3359,7 +4072,8 @@ def run_app() -> None:
     def _update_daily_btn_state() -> None:
         try:
             has_model = state.selected_model_key is not None
-            if getattr(state, "show_played", False) and has_model:
+            allowed = getattr(state, "show_played", False) and has_model
+            if allowed:
                 try:
                     daily_btn.state(["!disabled"])
                     # Re-pack if previously hidden
@@ -3371,6 +4085,17 @@ def run_app() -> None:
                     except Exception:
                         pass
                 try:
+                    if "league_btn" in locals():
+                        league_btn.state(["!disabled"])
+                        league_btn.pack_info()
+                except Exception:
+                    try:
+                        if "league_btn" in locals():
+                            league_btn.pack(side=tk.LEFT, padx=(0, 12))
+                            league_btn.state(["!disabled"])
+                    except Exception:
+                        pass
+                try:
                     if state.daily_side_btn is not None:
                         state.daily_side_btn.state(["!disabled"])
                         try:
@@ -3379,16 +4104,43 @@ def run_app() -> None:
                             pass
                 except Exception:
                     pass
+                try:
+                    if state.league_side_btn is not None:
+                        state.league_side_btn.state(["!disabled"])
+                        try:
+                            state.league_side_btn.grid()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
             else:
                 try:
                     daily_btn.state(["disabled"])
-                    daily_btn.pack_forget()
+                    try:
+                        daily_btn.pack_info()
+                    except Exception:
+                        daily_btn.pack(side=tk.LEFT, padx=(0, 12))
+                except Exception:
+                    pass
+                try:
+                    if "league_btn" in locals():
+                        league_btn.state(["disabled"])
+                        try:
+                            league_btn.pack_info()
+                        except Exception:
+                            league_btn.pack(side=tk.LEFT, padx=(0, 12))
                 except Exception:
                     pass
                 try:
                     if state.daily_side_btn is not None:
                         state.daily_side_btn.state(["disabled"])
-                        state.daily_side_btn.grid_remove()
+                        state.daily_side_btn.grid()
+                except Exception:
+                    pass
+                try:
+                    if state.league_side_btn is not None:
+                        state.league_side_btn.state(["disabled"])
+                        state.league_side_btn.grid()
                 except Exception:
                     pass
         except Exception:
@@ -3419,6 +4171,12 @@ def run_app() -> None:
         btn_frame, text="Napi statisztika", command=lambda: _open_daily_stats_window(state)
     )
     daily_btn.pack(side=tk.LEFT, padx=(0, 12))
+
+    league_btn = ttk.Button(
+        btn_frame, text="Liga statisztik\u00e1k", command=lambda: _open_league_stats_window(state)
+    )
+    league_btn.pack(side=tk.LEFT, padx=(0, 12))
+
     _update_daily_btn_state()
 
     # Winners-only checkbox (visible only for played view with a selected model)
@@ -3480,6 +4238,10 @@ def run_app() -> None:
         refresh_table(state, allow_network=False)
         try:
             _refresh_daily_stats_window(state)
+        except Exception:
+            pass
+        try:
+            _refresh_league_stats_window(state)
         except Exception:
             pass
 
