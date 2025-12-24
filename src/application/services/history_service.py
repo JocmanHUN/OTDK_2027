@@ -536,18 +536,6 @@ class HistoryService:
         status = (
             (fx.get("status") or {}).get("short") if isinstance(fx.get("status"), Mapping) else None
         )
-        teams = item.get("teams") or {}
-        home_t = teams.get("home") or {}
-        away_t = teams.get("away") or {}
-        # If API already flags a winner team
-        try:
-            if home_t.get("winner") is True:
-                return "1"
-            if away_t.get("winner") is True:
-                return "2"
-        except Exception:
-            pass
-
         # Accept a set of finished statuses
         finished_statuses = {"FT", "AET", "PEN"}
         if status not in finished_statuses:

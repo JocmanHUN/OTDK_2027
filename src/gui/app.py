@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import sqlite3
 import time
@@ -912,16 +913,25 @@ ODDS_BINS = [
 ]
 
 EV_BINS = [
-    ("EV <= -20%", -1e9, -0.20),
+    ("EV < -50%", float("-inf"), -0.50),
+    ("-50% .. -40%", -0.50, -0.40),
+    ("-40% .. -30%", -0.40, -0.30),
+    ("-30% .. -20%", -0.30, -0.20),
     ("-20% .. -10%", -0.20, -0.10),
     ("-10% .. 0%", -0.10, 0.0),
-    ("0 .. +5%", 0.0, 0.05),
-    ("+5% .. +10%", 0.05, 0.10),
+    ("0% .. +10%", 0.0, 0.10),
     ("+10% .. +20%", 0.10, 0.20),
-    ("+20% .. +50%", 0.20, 0.50),
-    ("+50% .. +100%", 0.50, 1.00),
-    ("+100% .. +200%", 1.00, 2.00),
-    ("EV > +200%", 2.00, 1e9),
+    ("+20% .. +30%", 0.20, 0.30),
+    ("+30% .. +40%", 0.30, 0.40),
+    ("+40% .. +50%", 0.40, 0.50),
+    ("+50% .. +60%", 0.50, 0.60),
+    ("+60% .. +70%", 0.60, 0.70),
+    ("+70% .. +80%", 0.70, 0.80),
+    ("+80% .. +90%", 0.80, 0.90),
+    ("+90% .. +100%", 0.90, 1.00),
+    ("+100% .. +150%", 1.00, 1.50),
+    ("+150% .. +200%", 1.50, 2.00),
+    ("EV >= +200%", 2.00, float("inf")),
 ]
 
 
@@ -952,6 +962,7 @@ class AppState:
     stats_frame: Any | None = None
     stats_vars: Dict[str, tk.StringVar] | None = None
     stats_bins_tree: ttk.Treeview | None = None
+    stats_ev_totals_tree: ttk.Treeview | None = None
     stats_ev_tree: ttk.Treeview | None = None
     exclude_extremes: bool = False
     exclude_extremes_var: tk.BooleanVar | None = None
@@ -966,6 +977,9 @@ class AppState:
     daily_profit_ax: Any | None = None
     daily_profit_canvas: Any | None = None
     daily_side_btn: Any | None = None
+    daily_top_n_var: tk.StringVar | None = None
+    daily_ev_range_var: tk.StringVar | None = None
+    daily_odds_range_var: tk.StringVar | None = None
 
 
 def _update_model_stats_panel(
@@ -1183,13 +1197,12 @@ def _update_model_stats_panel(
             except Exception:
                 pass
 
-        # Update EV-bin table
-        ev_tree = getattr(state, "stats_ev_tree", None)
-        if ev_tree is not None:
+        # Update EV summary (positive / negative EV)
+        ev_totals_tree = getattr(state, "stats_ev_totals_tree", None)
+        if ev_totals_tree is not None:
             try:
-                for i in ev_tree.get_children():
-                    ev_tree.delete(i)
-                # Overall positive/negative first
+                for i in ev_totals_tree.get_children():
+                    ev_totals_tree.delete(i)
                 for lbl, agg in [
                     ("EV > 0 összesen", ev_pos_total),
                     ("EV < 0 összesen", ev_neg_total),
@@ -1199,7 +1212,7 @@ def _update_model_stats_panel(
                     profit = float(agg.get("profit", 0.0) or 0.0)
                     hit = (w / c * 100.0) if c else None
                     roi_total = (profit / c * 100.0) if c else None
-                    ev_tree.insert(
+                    ev_totals_tree.insert(
                         "",
                         "end",
                         values=[
@@ -1214,7 +1227,15 @@ def _update_model_stats_panel(
                             else ("roi_neg",) if roi_total and roi_total < 0 else ()
                         ),
                     )
-                # Then detailed bins
+            except Exception:
+                pass
+
+        # Update detailed EV-bin table
+        ev_tree = getattr(state, "stats_ev_tree", None)
+        if ev_tree is not None:
+            try:
+                for i in ev_tree.get_children():
+                    ev_tree.delete(i)
                 for label, _lo, _hi in EV_BINS:
                     agg = ev_agg.get(label, {"count": 0, "wins": 0, "profit": 0.0})
                     count = int(agg.get("count", 0) or 0)
@@ -1250,10 +1271,25 @@ def _update_model_stats_panel(
         try:
             if state.stats_frame is not None:
                 state.stats_frame.grid_remove()
-            if state.stats_bins_tree is not None:
+            bins_tree = getattr(state, "stats_bins_tree", None)
+            if bins_tree is not None:
                 try:
-                    for i in state.stats_bins_tree.get_children():
-                        state.stats_bins_tree.delete(i)
+                    for i in bins_tree.get_children():
+                        bins_tree.delete(i)
+                except Exception:
+                    pass
+            ev_totals_tree = getattr(state, "stats_ev_totals_tree", None)
+            if ev_totals_tree is not None:
+                try:
+                    for i in ev_totals_tree.get_children():
+                        ev_totals_tree.delete(i)
+                except Exception:
+                    pass
+            ev_tree = getattr(state, "stats_ev_tree", None)
+            if ev_tree is not None:
+                try:
+                    for i in ev_tree.get_children():
+                        ev_tree.delete(i)
                 except Exception:
                     pass
         except Exception:
@@ -1268,8 +1304,8 @@ def _odds_bin_label(odd: float) -> str:
 
 
 def _ev_bin_label(ev: float) -> str:
-    for label, low, high in EV_BINS:
-        if ev >= low and ev <= high:
+    for idx, (label, low, high) in enumerate(EV_BINS):
+        if ev >= low and (idx == len(EV_BINS) - 1 or ev < high):
             return label
     return EV_BINS[-1][0]
 
@@ -1385,19 +1421,20 @@ def _model_odds_range_stats(conn: sqlite3.Connection) -> list[dict[str, Any]]:
 
 def _compute_daily_model_stats(
     state: AppState,
-) -> tuple[list[dict[str, Any]], list[tuple[str, float, float]], float]:
+) -> tuple[list[dict[str, Any]], list[tuple[str, float, float]], float, dict[str, float | None]]:
     """Aggregate finished matches per day for the selected model.
 
-    Returns (rows, cumulative_points, total_profit):
-    - rows: [{date, count, hit_rate, pos_count, neg_count, roi_pos, roi_neg, profit}]
+    Returns (rows, cumulative_points, total_profit, risk):
+    - rows: [{date, count, hit_rate, pos_count, neg_count, roi_pos, roi_neg, hit_pos, hit_neg, profit}]
     - cumulative_points: list of (date, bankroll_or_profit, raw_profit) for plotting
     - total_profit: overall profit across all counted matches
+    - risk: {"std": daily_profit_std, "max_drawdown": max_dd}
     """
 
     conn = getattr(state, "conn", None)
     model_key = getattr(state, "selected_model_key", None)
     if conn is None or model_key is None:
-        return [], [], 0.0
+        return [], [], 0.0, {"std": None, "max_drawdown": None}
 
     try:
         search_q = state.search_var.get().strip().lower() if state.search_var is not None else ""
@@ -1406,6 +1443,31 @@ def _compute_daily_model_stats(
 
     use_bm = state.selected_bookmaker_id
     exclude_ext = bool(getattr(state, "exclude_extremes", False))
+    top_n_var = getattr(state, "daily_top_n_var", None)
+    raw_val = top_n_var.get().strip() if top_n_var is not None else "0"
+    try:
+        if raw_val == "-":
+            top_n = 0
+        else:
+            top_n = max(0, int(raw_val))
+    except Exception:
+        top_n = 0
+
+    # Selected EV range filter (label from EV_BINS or "-")
+    ev_range_var = getattr(state, "daily_ev_range_var", None)
+    ev_label = ev_range_var.get().strip() if ev_range_var is not None else "-"
+    ev_range_map = {label: (low, high) for (label, low, high) in EV_BINS}
+    ev_bounds: tuple[float, float] | None = None
+    if ev_label in ev_range_map:
+        ev_bounds = ev_range_map[ev_label]
+
+    # Selected odds range filter
+    odds_range_var = getattr(state, "daily_odds_range_var", None)
+    odds_label = odds_range_var.get().strip() if odds_range_var is not None else "-"
+    odds_range_map = {label: (low, high) for (label, low, high) in ODDS_BINS}
+    odds_bounds: tuple[float | None, float | None] | None = None
+    if odds_label in odds_range_map:
+        odds_bounds = odds_range_map[odds_label]
 
     # Preload odds per match (selected bookmaker or best available)
     odds_by_match: Dict[int, Tuple[float, float, float]] = {}
@@ -1449,7 +1511,7 @@ def _compute_daily_model_stats(
     except Exception:
         rows = []
 
-    daily: Dict[str, Dict[str, float | int]] = {}
+    daily_matches: Dict[str, list[dict[str, Any]]] = {}
     total_profit = 0.0
 
     for mid, date_s, home, away, rr, ph, pd, pa, pref in rows:
@@ -1472,10 +1534,20 @@ def _compute_daily_model_stats(
             odd_val = oh if sel == "1" else (od if sel == "X" else oa)
             if odd_val is None or float(odd_val) <= 0.0:
                 continue
+            if odds_bounds is not None:
+                low_o, high_o = odds_bounds
+                ov = float(odd_val)
+                if (low_o is not None and ov < low_o) or (high_o is not None and ov > high_o):
+                    continue
             p_sel = phf if sel == "1" else (pdf if sel == "X" else paf)
             ev = float(p_sel) * float(odd_val) - 1.0
             if exclude_ext and (float(odd_val) > 10.0 or abs(ev) > 2.0):
                 continue
+            if ev_bounds is not None:
+                low_b, high_b = ev_bounds
+                # same semantics as _ev_bin_label: inclusive low, exclusive high except last bin
+                if not (ev >= low_b and (ev < high_b or high_b == float("inf"))):
+                    continue
 
             try:
                 dt = datetime.fromisoformat(str(date_s))
@@ -1493,48 +1565,56 @@ def _compute_daily_model_stats(
 
             win = str(rr) == sel
             profit = (float(odd_val) - 1.0) if win else -1.0
-            total_profit += profit
 
-            entry = daily.get(day_key)
-            if entry is None:
-                entry = {
-                    "count": 0,
-                    "wins": 0,
-                    "pos_count": 0,
-                    "neg_count": 0,
-                    "pos_profit": 0.0,
-                    "neg_profit": 0.0,
-                    "profit_all": 0.0,
+            bucket = daily_matches.get(day_key)
+            if bucket is None:
+                bucket = []
+                daily_matches[day_key] = bucket
+            bucket.append(
+                {
+                    "ev": ev,
+                    "win": win,
+                    "profit": profit,
                 }
-                daily[day_key] = entry
-            entry["count"] = int(entry.get("count", 0)) + 1
-            entry["wins"] = int(entry.get("wins", 0)) + (1 if win else 0)
-            entry["profit_all"] = float(entry.get("profit_all", 0.0)) + profit
-            if ev >= 0:
-                entry["pos_count"] = int(entry.get("pos_count", 0)) + 1
-                entry["pos_profit"] = float(entry.get("pos_profit", 0.0)) + profit
-            else:
-                entry["neg_count"] = int(entry.get("neg_count", 0)) + 1
-                entry["neg_profit"] = float(entry.get("neg_profit", 0.0)) + profit
+            )
         except Exception:
             continue
 
     rows_out: list[dict[str, Any]] = []
     cumulative: list[tuple[str, float, float]] = []
     running = 0.0
+    peak = 0.0
+    max_dd = 0.0  # negative or zero
+    daily_profit_list: list[float] = []
     bankroll = getattr(state, "bankroll_amount", None)
-    for day in sorted(daily.keys()):
-        d = daily[day]
-        cnt = int(d.get("count", 0) or 0)
-        wins = int(d.get("wins", 0) or 0)
-        pos_cnt = int(d.get("pos_count", 0) or 0)
-        neg_cnt = int(d.get("neg_count", 0) or 0)
-        pos_profit = float(d.get("pos_profit", 0.0) or 0.0)
-        neg_profit = float(d.get("neg_profit", 0.0) or 0.0)
-        profit_all = float(d.get("profit_all", 0.0) or 0.0)
+    for day in sorted(daily_matches.keys()):
+        matches = daily_matches[day]
+        # If top_n > 0, pick the best positive EV tips up to N
+        if top_n > 0:
+            positives = [m for m in matches if m.get("ev", 0.0) >= 0]
+            positives.sort(key=lambda x: float(x.get("ev", 0.0)), reverse=True)
+            selected = positives[:top_n]
+        else:
+            selected = matches
+
+        cnt = len(selected)
+        wins = sum(1 for m in selected if m.get("win"))
+        pos_matches = [m for m in selected if m.get("ev", 0.0) >= 0]
+        neg_matches = [m for m in selected if m.get("ev", 0.0) < 0]
+        pos_cnt = len(pos_matches)
+        neg_cnt = len(neg_matches)
+        pos_wins = sum(1 for m in pos_matches if m.get("win"))
+        neg_wins = sum(1 for m in neg_matches if m.get("win"))
+        pos_profit = sum(float(m.get("profit", 0.0)) for m in pos_matches)
+        neg_profit = sum(float(m.get("profit", 0.0)) for m in neg_matches)
+        profit_all = sum(float(m.get("profit", 0.0)) for m in selected)
+        total_profit += profit_all
         hit_rate = (wins / cnt * 100.0) if cnt else None
         roi_pos = (pos_profit / pos_cnt * 100.0) if pos_cnt else None
         roi_neg = (neg_profit / neg_cnt * 100.0) if neg_cnt else None
+        hit_pos = (pos_wins / pos_cnt * 100.0) if pos_cnt else None
+        hit_neg = (neg_wins / neg_cnt * 100.0) if neg_cnt else None
+        daily_profit_list.append(profit_all)
         rows_out.append(
             {
                 "date": day,
@@ -1544,14 +1624,31 @@ def _compute_daily_model_stats(
                 "neg_count": neg_cnt,
                 "roi_pos": roi_pos,
                 "roi_neg": roi_neg,
+                "hit_pos": hit_pos,
+                "hit_neg": hit_neg,
                 "profit": profit_all,
             }
         )
         running += profit_all
+        if running > peak:
+            peak = running
+        dd_now = running - peak
+        if dd_now < max_dd:
+            max_dd = dd_now
         y_val = running + bankroll if bankroll is not None else running
         cumulative.append((day, y_val, running))
 
-    return rows_out, cumulative, total_profit
+    std_val = None
+    if len(daily_profit_list) >= 2:
+        mean_val = sum(daily_profit_list) / len(daily_profit_list)
+        variance = sum((x - mean_val) ** 2 for x in daily_profit_list) / (
+            len(daily_profit_list) - 1
+        )
+        std_val = math.sqrt(variance)
+
+    risk = {"std": std_val, "max_drawdown": max_dd if daily_profit_list else None}
+
+    return rows_out, cumulative, total_profit, risk
 
 
 def _refresh_daily_stats_window(state: AppState) -> None:
@@ -1621,7 +1718,7 @@ def _refresh_daily_stats_window(state: AppState) -> None:
             pass
         return
 
-    rows, cumulative, total_profit = _compute_daily_model_stats(state)
+    rows, cumulative, total_profit, risk = _compute_daily_model_stats(state)
 
     # Info label
     try:
@@ -1632,9 +1729,13 @@ def _refresh_daily_stats_window(state: AppState) -> None:
                 int(state.selected_bookmaker_id), str(state.selected_bookmaker_id)
             )
         total_matches = sum(r.get("count", 0) or 0 for r in rows)
+        std_val = risk.get("std") if isinstance(risk, dict) else None
+        dd_val = risk.get("max_drawdown") if isinstance(risk, dict) else None
+        std_str = f"{std_val:.2f}" if std_val is not None else "-"
+        dd_str = f"{dd_val:.2f}" if dd_val is not None else "-"
         if info_var is not None:
             info_var.set(
-                f"Modell: {model_label} | Fogad\u00f3iroda: {bm_label} | Meccsek: {total_matches} | \u00d6sszprofit: {total_profit:+.2f}"
+                f"Modell: {model_label} | Fogad\u00f3iroda: {bm_label} | Meccsek: {total_matches} | \u00d6sszprofit: {total_profit:+.2f} | Sz\u00f3r\u00e1s: {std_str} egys\u00e9g | Max DD: {dd_str} egys\u00e9g"
             )
     except Exception:
         if info_var is not None:
@@ -1642,14 +1743,41 @@ def _refresh_daily_stats_window(state: AppState) -> None:
 
     # Table
     try:
+        # Adjust visible columns based on Top-N (+EV only) selection
+        try:
+            cols_all = tuple(tv.cget("columns"))
+        except Exception:
+            cols_all = ()
+        try:
+            tn_var = getattr(state, "daily_top_n_var", None)
+            tn_raw = tn_var.get().strip() if tn_var is not None else "-"
+            tn_val = 0 if tn_raw == "-" else max(0, int(tn_raw))
+            hide_neg_cols = tn_val > 0
+        except Exception:
+            hide_neg_cols = False
+        if cols_all:
+            display_cols = [
+                c
+                for c in cols_all
+                if not (hide_neg_cols and c in ("-EV db", "ROI -EV", "-EV tal\u00e1lati %"))
+            ]
+            try:
+                tv.configure(displaycolumns=display_cols)
+            except Exception:
+                pass
+
         for i in tv.get_children():
             tv.delete(i)
         for r in rows:
             hit_str = f"{r['hit_rate']:.1f}%" if r.get("hit_rate") is not None else "-"
             roi_pos = r.get("roi_pos")
             roi_neg = r.get("roi_neg")
+            hit_pos = r.get("hit_pos")
+            hit_neg = r.get("hit_neg")
             roi_pos_str = f"{roi_pos:+.1f}%" if roi_pos is not None else "-"
             roi_neg_str = f"{roi_neg:+.1f}%" if roi_neg is not None else "-"
+            hit_pos_str = f"{hit_pos:.1f}%" if hit_pos is not None else "-"
+            hit_neg_str = f"{hit_neg:.1f}%" if hit_neg is not None else "-"
             profit_str = f"{r.get('profit', 0.0):+.2f}"
             tag = (
                 "roi_pos"
@@ -1665,6 +1793,8 @@ def _refresh_daily_stats_window(state: AppState) -> None:
                     hit_str,
                     r.get("pos_count"),
                     r.get("neg_count"),
+                    hit_pos_str,
+                    hit_neg_str,
                     roi_pos_str,
                     roi_neg_str,
                     profit_str,
@@ -1748,6 +1878,51 @@ def _open_daily_stats_window(state: AppState) -> None:
             row=0, column=0, columnspan=2, sticky="we", padx=6, pady=(6, 4)
         )
 
+        # Top-N selector for +EV tippek
+        top_n_frame = ttk.Frame(win)
+        top_n_frame.grid(row=1, column=0, columnspan=2, sticky="w", padx=6, pady=(0, 4))
+        ttk.Label(top_n_frame, text="Top +EV tippek / nap:").pack(side=tk.LEFT, padx=(0, 6))
+        top_n_var = tk.StringVar(value="-")
+        state.daily_top_n_var = top_n_var
+        top_n_combo = ttk.Combobox(
+            top_n_frame,
+            textvariable=top_n_var,
+            values=["-", "3", "5", "10"],
+            state="readonly",
+            width=5,
+        )
+        top_n_combo.pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Label(top_n_frame, text="- = összes +EV tipp").pack(side=tk.LEFT)
+        top_n_combo.bind("<<ComboboxSelected>>", lambda _e: _refresh_daily_stats_window(state))
+
+        # EV range selector
+        ev_frame = ttk.Frame(win)
+        ev_frame.grid(row=2, column=0, columnspan=2, sticky="w", padx=6, pady=(0, 4))
+        ttk.Label(ev_frame, text="EV tartom\u00e1ny:").pack(side=tk.LEFT, padx=(0, 6))
+        ev_var = tk.StringVar(value="-")
+        state.daily_ev_range_var = ev_var
+        ev_options = ["-"] + [lbl for (lbl, _lo, _hi) in EV_BINS]
+        ev_combo = ttk.Combobox(
+            ev_frame, textvariable=ev_var, values=ev_options, state="readonly", width=16
+        )
+        ev_combo.pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Label(ev_frame, text="- = \u00f6sszes EV").pack(side=tk.LEFT)
+        ev_combo.bind("<<ComboboxSelected>>", lambda _e: _refresh_daily_stats_window(state))
+
+        # Odds range selector
+        odds_frame = ttk.Frame(win)
+        odds_frame.grid(row=3, column=0, columnspan=2, sticky="w", padx=6, pady=(0, 4))
+        ttk.Label(odds_frame, text="Odds tartom\u00e1ny:").pack(side=tk.LEFT, padx=(0, 6))
+        odds_var = tk.StringVar(value="-")
+        state.daily_odds_range_var = odds_var
+        odds_options = ["-"] + [lbl for (lbl, _lo, _hi) in ODDS_BINS]
+        odds_combo = ttk.Combobox(
+            odds_frame, textvariable=odds_var, values=odds_options, state="readonly", width=18
+        )
+        odds_combo.pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Label(odds_frame, text="- = \u00f6sszes odds").pack(side=tk.LEFT)
+        odds_combo.bind("<<ComboboxSelected>>", lambda _e: _refresh_daily_stats_window(state))
+
         # Table
         cols = (
             "D\u00e1tum",
@@ -1755,6 +1930,8 @@ def _open_daily_stats_window(state: AppState) -> None:
             "Tal\u00e1lati ar\u00e1ny",
             "+EV db",
             "-EV db",
+            "+EV tal\u00e1lati %",
+            "-EV tal\u00e1lati %",
             "ROI +EV",
             "ROI -EV",
             "Napi profit",
@@ -1766,6 +1943,8 @@ def _open_daily_stats_window(state: AppState) -> None:
             "Tal\u00e1lati ar\u00e1ny": 110,
             "+EV db": 70,
             "-EV db": 70,
+            "+EV tal\u00e1lati %": 110,
+            "-EV tal\u00e1lati %": 110,
             "ROI +EV": 90,
             "ROI -EV": 90,
             "Napi profit": 100,
@@ -1775,8 +1954,8 @@ def _open_daily_stats_window(state: AppState) -> None:
             tv.column(c, width=widths.get(c, 100), anchor=("w" if c == "D\u00e1tum" else "center"))
         vsb = ttk.Scrollbar(win, orient="vertical", command=tv.yview)
         tv.configure(yscrollcommand=vsb.set)
-        tv.grid(row=1, column=0, sticky="nsew", padx=(6, 0), pady=(0, 6))
-        vsb.grid(row=1, column=1, sticky="ns", pady=(0, 6))
+        tv.grid(row=4, column=0, sticky="nsew", padx=(6, 0), pady=(0, 6))
+        vsb.grid(row=4, column=1, sticky="ns", pady=(0, 6))
         try:
             tv.tag_configure("roi_pos", foreground="#006400")
             tv.tag_configure("roi_neg", foreground="#8b0000")
@@ -1786,7 +1965,7 @@ def _open_daily_stats_window(state: AppState) -> None:
 
         # Chart
         chart_frame = ttk.Frame(win)
-        chart_frame.grid(row=2, column=0, columnspan=2, sticky="nsew", padx=6, pady=(0, 6))
+        chart_frame.grid(row=5, column=0, columnspan=2, sticky="nsew", padx=6, pady=(0, 6))
         try:
             from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
             from matplotlib.figure import Figure
@@ -1809,7 +1988,7 @@ def _open_daily_stats_window(state: AppState) -> None:
 
         # Refresh button
         btn_bar = ttk.Frame(win)
-        btn_bar.grid(row=3, column=0, columnspan=2, sticky="we", padx=6, pady=(0, 8))
+        btn_bar.grid(row=6, column=0, columnspan=2, sticky="we", padx=6, pady=(0, 8))
         ttk.Button(
             btn_bar, text="Friss\u00edt\u00e9s", command=lambda: _refresh_daily_stats_window(state)
         ).pack(side=tk.LEFT)
@@ -1824,6 +2003,9 @@ def _open_daily_stats_window(state: AppState) -> None:
                 state.daily_profit_ax = None
                 state.daily_profit_canvas = None
                 state.daily_stats_info_var = None
+                state.daily_top_n_var = None
+                state.daily_ev_range_var = None
+                state.daily_odds_range_var = None
 
         try:
             win.protocol("WM_DELETE_WINDOW", _on_close)
@@ -1977,31 +2159,6 @@ def refresh_table(state: AppState, *, allow_network: bool = True) -> None:
         _reconcile_prediction_statuses(state.conn)
     except Exception:
         pass
-    # Opportunistic retry: for upcoming view, attempt to process fixtures not yet persisted
-    if allow_network:
-        try:
-            if not getattr(state, "show_played", False):
-                global _LAST_RETRY_PRED_AT
-                import time as _t
-
-                last = _LAST_RETRY_PRED_AT
-                # Retry at most every 300s
-                if last is None or (_t.time() - float(last)) > 300.0:
-                    try:
-                        write_conn = _ensure_db()
-                    except Exception:
-                        write_conn = state.conn
-                    _log_pipeline("pipeline: retrying fixtures")
-                    fixtures = _select_fixtures_for_tomorrow()
-                    _log_pipeline(f"pipeline: retry fixtures={len(fixtures)}")
-                    for r in fixtures:
-                        try:
-                            _predict_then_persist_if_complete(write_conn, r)
-                        except Exception:
-                            pass
-                    _LAST_RETRY_PRED_AT = _t.time()
-        except Exception:
-            pass
     if getattr(state, "show_played", False):
         matches, preds_by_match = _read_played_from_db(state.conn, days=None)
     else:
@@ -3010,9 +3167,35 @@ def run_app() -> None:
             pass
         bins_tree.grid(row=len(labels), column=0, columnspan=2, sticky="nsew", padx=6, pady=(6, 4))
         state.stats_bins_tree = bins_tree
-        # EV-bin table (positive/negative EV ranges)
+        # EV totals table (EV > 0 / EV < 0)
+        ev_totals_cols = ("EV sáv", "Találati arány", "Minta", "ROI")
+        ev_totals_tree = ttk.Treeview(
+            stats_frame, columns=ev_totals_cols, show="headings", height=2
+        )
+        for idx, col in enumerate(ev_totals_cols):
+            anchor_val_ev_tot: Literal["center", "w"] = "w" if idx == 0 else "center"
+            width = 120 if idx == 0 else 90
+            ev_totals_tree.heading(col, text=col)
+            ev_totals_tree.column(col, width=width, anchor=anchor_val_ev_tot, stretch=False)
+        try:
+            ev_totals_tree.tag_configure("roi_pos", foreground="#006400")
+            ev_totals_tree.tag_configure("roi_neg", foreground="#8b0000")
+        except Exception:
+            pass
+        ev_totals_tree.grid(
+            row=len(labels) + 1, column=0, columnspan=2, sticky="nsew", padx=6, pady=(0, 4)
+        )
+        state.stats_ev_totals_tree = ev_totals_tree
+        # EV-bin table (detailed EV ranges)
         ev_cols = ("EV sáv", "Találati arány", "Minta", "ROI")
-        ev_tree = ttk.Treeview(stats_frame, columns=ev_cols, show="headings", height=7)
+        ev_frame = ttk.Frame(stats_frame)
+        ev_frame.grid(
+            row=len(labels) + 2, column=0, columnspan=2, sticky="nsew", padx=6, pady=(0, 6)
+        )
+        ev_frame.grid_columnconfigure(0, weight=1)
+        ev_frame.grid_rowconfigure(0, weight=1)
+        ev_height = min(len(EV_BINS), 10)  # keep viewport manageable, use scrollbar for the rest
+        ev_tree = ttk.Treeview(ev_frame, columns=ev_cols, show="headings", height=ev_height)
         for idx, col in enumerate(ev_cols):
             anchor_val_ev: Literal["center", "w"] = "w" if idx == 0 else "center"
             width = 120 if idx == 0 else 90
@@ -3023,9 +3206,10 @@ def run_app() -> None:
             ev_tree.tag_configure("roi_neg", foreground="#8b0000")
         except Exception:
             pass
-        ev_tree.grid(
-            row=len(labels) + 1, column=0, columnspan=2, sticky="nsew", padx=6, pady=(0, 6)
-        )
+        ev_scroll = ttk.Scrollbar(ev_frame, orient="vertical", command=ev_tree.yview)
+        ev_tree.configure(yscrollcommand=ev_scroll.set)
+        ev_tree.grid(row=0, column=0, sticky="nsew")
+        ev_scroll.grid(row=0, column=1, sticky="ns")
         state.stats_ev_tree = ev_tree
         # Checkbox to drop extreme values from stats
         try:
@@ -3044,7 +3228,7 @@ def run_app() -> None:
                 stats_frame,
                 text="Extrém értékek kihagyása",
                 variable=exclude_var,
-            ).grid(row=len(labels) + 2, column=0, columnspan=2, sticky="w", padx=6, pady=(0, 6))
+            ).grid(row=len(labels) + 3, column=0, columnspan=2, sticky="w", padx=6, pady=(0, 6))
         except Exception:
             state.exclude_extremes = False
             state.exclude_extremes_var = None
@@ -3056,7 +3240,7 @@ def run_app() -> None:
                 command=lambda: _open_daily_stats_window(state),
             )
             daily_side_btn.grid(
-                row=len(labels) + 3, column=0, columnspan=2, sticky="w", padx=6, pady=(0, 6)
+                row=len(labels) + 4, column=0, columnspan=2, sticky="w", padx=6, pady=(0, 6)
             )
             state.daily_side_btn = daily_side_btn
         except Exception:
@@ -3176,17 +3360,35 @@ def run_app() -> None:
         try:
             has_model = state.selected_model_key is not None
             if getattr(state, "show_played", False) and has_model:
-                daily_btn.state(["!disabled"])
+                try:
+                    daily_btn.state(["!disabled"])
+                    # Re-pack if previously hidden
+                    daily_btn.pack_info()
+                except Exception:
+                    try:
+                        daily_btn.pack(side=tk.LEFT, padx=(0, 12))
+                        daily_btn.state(["!disabled"])
+                    except Exception:
+                        pass
                 try:
                     if state.daily_side_btn is not None:
                         state.daily_side_btn.state(["!disabled"])
+                        try:
+                            state.daily_side_btn.grid()
+                        except Exception:
+                            pass
                 except Exception:
                     pass
             else:
-                daily_btn.state(["disabled"])
+                try:
+                    daily_btn.state(["disabled"])
+                    daily_btn.pack_forget()
+                except Exception:
+                    pass
                 try:
                     if state.daily_side_btn is not None:
                         state.daily_side_btn.state(["disabled"])
+                        state.daily_side_btn.grid_remove()
                 except Exception:
                     pass
         except Exception:
