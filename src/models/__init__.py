@@ -6,7 +6,7 @@ from src.application.services.history_service import HistoryService
 from src.domain.interfaces.modeling import BasePredictiveModel
 
 from .balance import BalanceModel
-from .balance_blend import BalanceBlendHighModel, BalanceBlendMediumModel, BalanceBlendModel
+from .balance_blend import BalanceBlendHighModel, BalanceBlendLowModel, BalanceBlendMediumModel
 from .balance_luck import BalanceLuckHighModel, BalanceLuckLowModel, BalanceLuckModel
 from .balance_shift import BalanceShiftModel
 from .elo import EloModel
@@ -14,7 +14,7 @@ from .logistic_regression import LogisticRegressionModel
 from .monte_carlo import MonteCarloModel
 from .poisson import PoissonModel
 from .veto import VetoModel
-from .veto_blend import VetoBlendHighModel, VetoBlendMediumModel, VetoBlendModel
+from .veto_blend import VetoBlendHighModel, VetoBlendLowModel, VetoBlendMediumModel
 from .veto_luck import VetoLuckHighModel, VetoLuckLowModel, VetoLuckModel
 from .veto_shift import VetoShiftModel
 
@@ -28,7 +28,7 @@ def default_models() -> List[BasePredictiveModel]:
         EloModel(),
         LogisticRegressionModel(),
         BalanceModel(history=history),
-        BalanceBlendModel(history=history),
+        BalanceBlendLowModel(history=history),
         BalanceBlendMediumModel(history=history),
         BalanceBlendHighModel(history=history),
         BalanceLuckLowModel(history=history),
@@ -36,7 +36,7 @@ def default_models() -> List[BasePredictiveModel]:
         BalanceLuckHighModel(history=history),
         BalanceShiftModel(history=history),
         VetoModel(history=history),
-        VetoBlendModel(history=history),
+        VetoBlendLowModel(history=history),
         VetoBlendMediumModel(history=history),
         VetoBlendHighModel(history=history),
         VetoLuckLowModel(history=history),
@@ -67,8 +67,8 @@ def blend_models(
     """Return blend variants (shared alpha) for Balance/Veto."""
     history = history or HistoryService()
     return [
-        BalanceBlendModel(history=history, mix_weight=mix_weight),
-        VetoBlendModel(history=history, mix_weight=mix_weight),
+        BalanceBlendLowModel(history=history, mix_weight=mix_weight),
+        VetoBlendLowModel(history=history, mix_weight=mix_weight),
     ]
 
 

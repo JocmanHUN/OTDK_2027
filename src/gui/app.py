@@ -736,7 +736,12 @@ def _read_pending_from_db(
         )
         rows = cur.fetchall()
         preds_by_match[int(mid)] = {
-            str(model): (float(ph), float(pd), float(pa), (pred if isinstance(pred, str) else None))
+            _canonical_model_key(str(model)): (
+                float(ph),
+                float(pd),
+                float(pa),
+                (pred if isinstance(pred, str) else None),
+            )
             for (model, ph, pd, pa, pred) in rows
         }
 
@@ -784,7 +789,12 @@ def _read_played_from_db(
         )
         rows = cur.fetchall()
         preds_by_match[int(mid)] = {
-            str(model): (float(ph), float(pd), float(pa), (pred if isinstance(pred, str) else None))
+            _canonical_model_key(str(model)): (
+                float(ph),
+                float(pd),
+                float(pa),
+                (pred if isinstance(pred, str) else None),
+            )
             for (model, ph, pd, pa, pred) in rows
         }
 
@@ -901,7 +911,7 @@ MODEL_HEADERS = {
     "elo": "Elo",
     "logistic_regression": "LogReg",
     "balance": "Balance",
-    "balance_blend": "BalanceBlend",
+    "balance_blend_low": "BalanceBlend-L",
     "balance_blend_medium": "BalanceBlend-M",
     "balance_blend_high": "BalanceBlend-H",
     "balance_luck_low": "BalanceLuck-L",
@@ -909,7 +919,7 @@ MODEL_HEADERS = {
     "balance_luck_high": "BalanceLuck-H",
     "balance_shift": "BalanceShift",
     "veto": "Veto",
-    "veto_blend": "VetoBlend",
+    "veto_blend_low": "VetoBlend-L",
     "veto_blend_medium": "VetoBlend-M",
     "veto_blend_high": "VetoBlend-H",
     "veto_luck_low": "VetoLuck-L",
@@ -917,6 +927,24 @@ MODEL_HEADERS = {
     "veto_luck_high": "VetoLuck-H",
     "veto_shift": "VetoShift",
 }
+
+# Legacy -> canonical model name mapping (keep old DB rows usable without duplicate columns)
+MODEL_ALIASES: Dict[str, str] = {
+    "balance_blend": "balance_blend_low",
+    "veto_blend": "veto_blend_low",
+}
+MODEL_ALIAS_REVERSE: Dict[str, list[str]] = {}
+for legacy, canon in MODEL_ALIASES.items():
+    MODEL_ALIAS_REVERSE.setdefault(canon, []).append(legacy)
+
+
+def _canonical_model_key(key: str) -> str:
+    return MODEL_ALIASES.get(key, key)
+
+
+def _alias_keys_for(key: str) -> list[str]:
+    return [key] + MODEL_ALIAS_REVERSE.get(key, [])
+
 
 ODDS_BINS = [
     ("Very Low (1.01-1.30)", 1.01, 1.30),
@@ -1460,15 +1488,14 @@ def _model_odds_range_stats(conn: sqlite3.Connection) -> list[dict[str, Any]]:
 
     model_order: list[str] = list(MODEL_HEADERS.keys())
     try:
-        extra_models = [
-            str(r[0])
-            for r in conn.execute(
-                "SELECT DISTINCT model_name FROM predictions ORDER BY model_name"
-            ).fetchall()
-        ]
+        extra_models_raw = conn.execute(
+            "SELECT DISTINCT model_name FROM predictions ORDER BY model_name"
+        ).fetchall()
+        extra_models = [str(r[0]) for r in extra_models_raw]
         for m in extra_models:
-            if m not in model_order:
-                model_order.append(m)
+            mk = _canonical_model_key(str(m))
+            if mk not in model_order:
+                model_order.append(mk)
     except Exception:
         pass
 
@@ -1489,7 +1516,7 @@ def _model_odds_range_stats(conn: sqlite3.Connection) -> list[dict[str, Any]]:
 
     for model_name, pref, mid, real_res in rows:
         try:
-            mk = str(model_name)
+            mk = _canonical_model_key(str(model_name))
             sel = str(pref)
             if sel not in {"1", "X", "2"}:
                 continue
@@ -1618,17 +1645,19 @@ def _compute_daily_model_stats(
         except Exception:
             odds_by_match = {}
 
+    model_keys = _alias_keys_for(str(model_key))
+    placeholders = ",".join("?" for _ in model_keys) or "?"
     try:
         cur = conn.execute(
-            """
+            f"""
             SELECT m.match_id, m.date, m.home_team, m.away_team, m.real_result,
                    p.prob_home, p.prob_draw, p.prob_away, p.predicted_result
             FROM matches m
             JOIN predictions p ON p.match_id = m.match_id
-            WHERE m.real_result IN ('1','X','2') AND p.model_name = ?
+            WHERE m.real_result IN ('1','X','2') AND p.model_name IN ({placeholders})
             ORDER BY m.date ASC
             """,
-            (model_key,),
+            tuple(model_keys),
         )
         rows = cur.fetchall()
     except Exception:
@@ -1836,9 +1865,11 @@ def _compute_league_stats(
         except Exception:
             odds_by_match = {}
 
+    model_keys = _alias_keys_for(str(model_key))
+    placeholders = ",".join("?" for _ in model_keys) or "?"
     try:
         cur = conn.execute(
-            """
+            f"""
             SELECT m.match_id,
                    m.date,
                    m.home_team,
@@ -1854,10 +1885,10 @@ def _compute_league_stats(
             FROM matches m
             JOIN predictions p ON p.match_id = m.match_id
             LEFT JOIN leagues l ON l.league_id = m.league_id
-            WHERE m.real_result IN ('1','X','2') AND p.model_name = ?
+            WHERE m.real_result IN ('1','X','2') AND p.model_name IN ({placeholders})
             ORDER BY m.date ASC
             """,
-            (model_key,),
+            tuple(model_keys),
         )
         rows = cur.fetchall()
     except Exception:
