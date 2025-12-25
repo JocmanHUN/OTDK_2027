@@ -32,26 +32,7 @@ def _env_flag(value: Optional[str]) -> bool:
 
 
 _GLOBAL_LOG_RESPONSES = _env_flag(os.getenv("API_FOOTBALL_LOG_RESPONSES"))
-_REQUEST_TIMES_SEC: deque[float] = deque(maxlen=100)
 _MAX_CALLS_PER_SEC = 5
-
-
-def _throttle_per_second() -> None:
-    """Sleep just enough to keep API calls under the per-second cap."""
-    if _MAX_CALLS_PER_SEC <= 0:
-        return
-    try:
-        now = time.monotonic()
-        cutoff = now - 1.0
-        while _REQUEST_TIMES_SEC and _REQUEST_TIMES_SEC[0] < cutoff:
-            _REQUEST_TIMES_SEC.popleft()
-        if len(_REQUEST_TIMES_SEC) >= _MAX_CALLS_PER_SEC:
-            sleep_for = (_REQUEST_TIMES_SEC[0] + 1.0) - now
-            if sleep_for > 0:
-                time.sleep(sleep_for)
-        _REQUEST_TIMES_SEC.append(time.monotonic())
-    except Exception:
-        pass
 
 
 def set_api_response_logging(enabled: bool) -> None:
@@ -103,6 +84,25 @@ class APIFootballClient:
         if headers:
             default_headers.update(headers)
         self._session.headers.update(default_headers)
+        # Per-client throttle state (avoid cross-test/global interference)
+        self._request_times_sec: deque[float] = deque(maxlen=100)
+
+    def _throttle_per_second(self) -> None:
+        """Sleep just enough to keep API calls under the per-second cap."""
+        if _MAX_CALLS_PER_SEC <= 0:
+            return
+        try:
+            now = time.monotonic()
+            cutoff = now - 1.0
+            while self._request_times_sec and self._request_times_sec[0] < cutoff:
+                self._request_times_sec.popleft()
+            if len(self._request_times_sec) >= _MAX_CALLS_PER_SEC:
+                sleep_for = (self._request_times_sec[0] + 1.0) - now
+                if sleep_for > 0:
+                    time.sleep(sleep_for)
+            self._request_times_sec.append(time.monotonic())
+        except Exception:
+            pass
 
     def _full_url(self, path: str) -> str:
         return f"{self.base_url}/{path.lstrip('/')}"
@@ -122,7 +122,7 @@ class APIFootballClient:
 
         while attempt <= self.max_retries:
             try:
-                _throttle_per_second()
+                self._throttle_per_second()
                 resp = self._session.request(
                     method="GET", url=url, params=norm_params, timeout=self.timeout
                 )
