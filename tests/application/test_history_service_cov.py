@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any, Mapping
 
 import pytest
+
+os.environ.setdefault("API_KEY", "dummy")
+os.environ.pop("USE_RAPIDAPI", None)
+os.environ.pop("RAPIDAPI_KEY", None)
 
 from src.application.services.history_service import (
     EloInput,
