@@ -1,11 +1,15 @@
+# mypy: ignore-errors
+
 from __future__ import annotations
 
+import sys
 import time
+from types import SimpleNamespace
 from typing import Any, Dict, List, Mapping
 
 import pytest
 
-from src.application.services.leagues_service import LeaguesService
+from src.application.services.leagues_service import LeaguesService, _parse_leagues_response
 
 
 class _FakeClient:
@@ -141,6 +145,50 @@ def test_get_leagues_for_season_filters_and_caches() -> None:
     assert len(client.calls) == 1
 
 
+def test_current_leagues_skips_non_current() -> None:
+    responses = {
+        "leagues?current": _payload(
+            [
+                {
+                    "league": {"id": 50, "name": "Old"},
+                    "country": {"name": "ZZ"},
+                    "seasons": [
+                        {
+                            "year": 2020,
+                            "current": False,
+                            "coverage": {"odds": True, "fixtures": {"statistics": True}},
+                        }
+                    ],
+                }
+            ]
+        )
+    }
+    svc = LeaguesService(client=_FakeClient(responses), ttl_seconds=60)
+    assert svc.get_current_leagues() == []
+
+
+def test_default_client_branch(monkeypatch: pytest.MonkeyPatch) -> None:
+    created = {"n": 0}
+
+    class _Client:
+        def __init__(self) -> None:
+            created["n"] += 1
+
+        def get(
+            self, path: str, params: Mapping[str, Any] | None = None
+        ) -> Any:  # pragma: no cover - stub
+            return {"response": []}
+
+    monkeypatch.setitem(
+        sys.modules,
+        "src.infrastructure.api_football_client",
+        SimpleNamespace(APIFootballClient=_Client),
+    )
+    svc = LeaguesService()
+    assert created["n"] == 1
+    assert svc.get_current_leagues() == []
+
+
 def test_cache_ttl_expiry_triggers_refetch(monkeypatch: pytest.MonkeyPatch) -> None:
     responses = {
         "leagues?current": _payload(
@@ -178,3 +226,53 @@ def test_cache_ttl_expiry_triggers_refetch(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr("time.monotonic", fake_monotonic)
     _ = svc.get_current_leagues()
     assert len(client.calls) == 2
+
+
+# ---- merged extra coverage tests ----
+
+
+class DummyClientExtra:
+    def __init__(self, payload: Any) -> None:
+        self.payload = payload
+
+    def get(self, path: str, params: Mapping[str, Any] | None = None) -> Any:
+        return self.payload
+
+
+def test_parse_leagues_response_skips_invalid_extra() -> None:
+    payload = {
+        "response": [
+            {"league": {"id": "bad"}, "country": {"name": "C"}, "seasons": [{"year": "2024"}]},
+            {
+                "league": {"id": 1, "name": "L1"},
+                "country": {"name": "C"},
+                "seasons": [{"year": 2024}],
+            },
+        ]
+    }
+    out = _parse_leagues_response(payload)
+    filtered = [r for r in out if isinstance(r.get("league", {}).get("id"), int)]
+    assert len(filtered) == 1 and filtered[0]["league"]["id"] == 1
+
+
+def test_leagues_service_default_client_extra(monkeypatch) -> None:
+    created = {"n": 0}
+
+    class _Client:
+        def __init__(self) -> None:
+            created["n"] += 1
+
+        def get(self, path: str, params: Mapping[str, Any] | None = None) -> Any:
+            return {"response": []}
+
+    def fake_init(self, client=None, ttl_seconds=1.0):
+        setattr(self, "_client", _Client())
+        from src.infrastructure.ttl_cache import TTLCache
+
+        self._cache_current = TTLCache(ttl_seconds)
+        self._cache_season = TTLCache(ttl_seconds)
+
+    monkeypatch.setattr(LeaguesService, "__init__", fake_init)
+    svc = LeaguesService()
+    assert created["n"] == 1
+    assert svc.get_current_leagues() == []

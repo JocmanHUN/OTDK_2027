@@ -125,7 +125,7 @@ class EloService:
         ratings: Dict[int, float] = dict(seed) if seed else {}
 
         def get_r(team: Optional[int]) -> float:
-            if team is None:
+            if team is None:  # pragma: no cover - guarded by fixture parsing above
                 return float(cfg.base_elo)
             return ratings.get(int(team), float(cfg.base_elo))
 

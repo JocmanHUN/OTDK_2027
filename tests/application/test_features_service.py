@@ -58,3 +58,16 @@ def test_features_diff_and_aggregates() -> None:
     assert abs(feats["diff_ball possession"] - 8.0) < 1e-9
     # Shots on target: Home avg 5.5, Away 3.5 → diff=2
     assert abs(feats["diff_shots on target"] - 2.0) < 1e-9
+
+
+def test_features_skips_non_numeric_stats() -> None:
+    svc = FeaturesService(
+        _HistFake(
+            [{"goals_for": 1, "goals_against": 0, "stats": {"bad": "x"}}],
+            [{"goals_for": 0, "goals_against": 1, "stats": {"good": 2}}],
+        )
+    )
+    feats = svc.build_features(home_team_id=1, away_team_id=2, league_id=1, season=2024, last=1)
+    # Non-numeric "bad" should be skipped, only "good" appears as diff_good
+    assert "diff_bad" not in feats
+    assert "diff_good" in feats

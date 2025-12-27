@@ -1,6 +1,9 @@
+# mypy: ignore-errors
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any
 
 from src.application.services.prediction_pipeline import ContextBuilder, PredictionAggregatorImpl
@@ -120,3 +123,65 @@ def test_context_builder_and_aggregator() -> None:
     preds = agg.run_all([_PoissonDummy(), _EloDummy()], match, ctx)
     assert len(preds) == 2
     assert all(p.status == PredictionStatus.OK for p in preds)
+
+
+class _FlakyHistory:
+    def __init__(self) -> None:
+        self.last_n_seen: int | None = None
+
+    def get_team_averages(self, team_id: int, league_id: int, season: int) -> Any:
+        return SimpleNamespace(
+            goals_for_home_avg=1.0,
+            goals_for_away_avg=1.0,
+            goals_against_home_avg=1.0,
+            goals_against_away_avg=1.0,
+        )
+
+    def simple_poisson_means(self, home: Any, away: Any) -> tuple[float, float]:
+        return (0.4, 0.5)
+
+    def get_recent_team_scores(
+        self, team_id: int, league_id: int, season: int, last: int, *, only_finished: bool = True
+    ) -> list[dict[str, Any]]:
+        self.last_n_seen = last
+        raise RuntimeError("no cache")
+
+    def league_goal_means(self, league_id: int, season: int) -> tuple[float, float]:
+        raise RuntimeError("league fail")
+
+
+def test_context_builder_fallbacks(monkeypatch) -> None:
+    builder = ContextBuilder(history=_FlakyHistory(), compute_features=False, features_last="bogus")
+    ctx = builder.build_from_meta(
+        fixture_id=1, league_id=2, season=2024, home_team_id=10, away_team_id=20
+    )
+    # Fallback last_n and league means are used when history raises
+    assert builder.history.last_n_seen == 10
+    assert ctx.home_goal_rate == 1.35
+    assert ctx.away_goal_rate == 1.15
+    assert ctx.features is None
+
+
+class _SkipModel(BasePredictiveModel):
+    name = ModelName.POISSON
+    version = "v-skip"
+
+    def predict(self, match: Match, ctx: ModelContext) -> Prediction:  # pragma: no cover
+        raise AssertionError("should not run")
+
+
+def test_prediction_aggregator_skips_without_minimal_inputs() -> None:
+    ctx = ModelContext(fixture_id=FixtureId(1), league_id=LeagueId(2), season=2024)
+    match = Match(
+        fixture_id=FixtureId(1),
+        league_id=LeagueId(2),
+        season=2024,
+        kickoff_utc=datetime.now(timezone.utc),
+        home_name="H",
+        away_name="A",
+        status=MatchStatus.SCHEDULED,
+    )
+    agg = PredictionAggregatorImpl()
+    preds = agg.run_all([_SkipModel()], match, ctx)
+    assert preds[0].status == PredictionStatus.SKIPPED
+    assert "Missing minimal inputs" in (preds[0].skip_reason or "")
