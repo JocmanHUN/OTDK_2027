@@ -1591,7 +1591,25 @@ def _compute_daily_model_stats(
     except Exception:
         search_q = ""
 
-    use_bm = state.selected_bookmaker_id
+    # Bookmaker selection: per-daily view dropdown overrides main selection; "-" means best available.
+    bm_choice_name = "-"
+    try:
+        bm_var = getattr(state, "daily_bm_var", None)
+        bm_choice_name = bm_var.get().strip() if bm_var is not None else "-"
+    except Exception:
+        bm_choice_name = "-"
+    use_bm = None
+    if bm_choice_name and bm_choice_name != "-":
+        try:
+            bm_map = getattr(state, "bm_names_by_id", None) or {}
+            rev = {v: k for k, v in bm_map.items()}
+            use_bm = rev.get(bm_choice_name)
+        except Exception:
+            use_bm = None
+    elif getattr(state, "selected_bookmaker_id", None) is not None:
+        use_bm = state.selected_bookmaker_id
+    # Store resolved bookmaker for later display
+    setattr(state, "daily_selected_bookmaker_id", use_bm)
     exclude_ext = bool(getattr(state, "exclude_extremes", False))
     top_n_var = getattr(state, "daily_top_n_var", None)
     raw_val = top_n_var.get().strip() if top_n_var is not None else "0"
@@ -1880,7 +1898,7 @@ def _show_daily_match_details(state: AppState, day_key: str) -> None:
 
     win = tk.Toplevel()
     win.title(f"Napi meccsek - {day_key}")
-    cols = ("Idő", "Meccs", "Eredmény", "Tipp", "Odds", "Fogadóiroda", "Profit")
+    cols = ("Idő", "Meccs", "Eredmény", "Tipp", "Odds", "EV", "Fogadóiroda", "Profit")
     tv = ttk.Treeview(win, columns=cols, show="headings", height=12)
     widths = {
         "Idő": 130,
@@ -1888,6 +1906,7 @@ def _show_daily_match_details(state: AppState, day_key: str) -> None:
         "Eredmény": 80,
         "Tipp": 70,
         "Odds": 80,
+        "EV": 90,
         "Fogadóiroda": 130,
         "Profit": 80,
     }
@@ -1910,6 +1929,7 @@ def _show_daily_match_details(state: AppState, day_key: str) -> None:
         rr = m.get("real_result")
         pred = m.get("predicted")
         odd_val = m.get("odd")
+        ev_val = m.get("ev")
         bm_name = m.get("bookmaker_name") or (
             f"ID {m.get('bookmaker_id')}" if m.get("bookmaker_id") else "-"
         )
@@ -1927,6 +1947,7 @@ def _show_daily_match_details(state: AppState, day_key: str) -> None:
                 result_label,
                 pred,
                 f"{odd_val:.2f}" if isinstance(odd_val, (int, float)) else "-",
+                f"{ev_val:+.3f}" if isinstance(ev_val, (int, float)) else "-",
                 bm_name,
                 profit_str,
             ),
@@ -2341,10 +2362,9 @@ def _refresh_daily_stats_window(state: AppState) -> None:
     try:
         model_label = MODEL_HEADERS.get(state.selected_model_key, state.selected_model_key or "-")
         bm_label = "(legjobb)"
-        if state.selected_bookmaker_id is not None and state.bm_names_by_id:
-            bm_label = state.bm_names_by_id.get(
-                int(state.selected_bookmaker_id), str(state.selected_bookmaker_id)
-            )
+        bm_id_disp = getattr(state, "daily_selected_bookmaker_id", None)
+        if bm_id_disp is not None and state.bm_names_by_id:
+            bm_label = state.bm_names_by_id.get(int(bm_id_disp), str(bm_id_disp))
         total_matches = sum(r.get("count", 0) or 0 for r in rows)
         std_val = risk.get("std") if isinstance(risk, dict) else None
         dd_val = risk.get("max_drawdown") if isinstance(risk, dict) else None
@@ -2431,13 +2451,8 @@ def _refresh_daily_stats_window(state: AppState) -> None:
                 ys = [p[1] for p in cumulative]
                 labels = [p[0] for p in cumulative]
                 ax.plot(xs, ys, marker="o", color="#1f77b4")
-                # Reduce x-label clutter: show at most ~12 readable labels, keep last
                 tick_idx = xs
                 tick_labels = labels
-                if labels:
-                    step = max(1, math.ceil(len(labels) / 12))
-                    tick_idx = [i for i in xs if (i % step == 0 or i == len(labels) - 1)]
-                    tick_labels = [labels[i] for i in tick_idx]
                 baseline = getattr(state, "bankroll_amount", None)
                 if baseline is not None:
                     ax.axhline(y=baseline, color="#888888", linestyle="--", linewidth=1.0)
@@ -2448,7 +2463,7 @@ def _refresh_daily_stats_window(state: AppState) -> None:
                 try:
                     fig = getattr(state, "daily_profit_fig", None)
                     if fig is not None:
-                        fig.subplots_adjust(bottom=0.22)
+                        fig.subplots_adjust(bottom=0.3)
                 except Exception:
                     pass
                 ax.set_ylabel(
@@ -2554,6 +2569,27 @@ def _open_daily_stats_window(state: AppState) -> None:
         ttk.Label(odds_frame, text="- = \u00f6sszes odds").pack(side=tk.LEFT)
         odds_combo.bind("<<ComboboxSelected>>", lambda _e: _refresh_daily_stats_window(state))
 
+        # Bookmaker selector (per daily stats view)
+        bm_frame = ttk.Frame(win)
+        bm_frame.grid(row=4, column=0, columnspan=2, sticky="w", padx=6, pady=(0, 6))
+        ttk.Label(bm_frame, text="Fogadóiroda:").pack(side=tk.LEFT, padx=(0, 6))
+        bm_var = tk.StringVar(value="-")
+        setattr(state, "daily_bm_var", bm_var)
+        bm_options = ["-"]
+        try:
+            bm_map = getattr(state, "bm_names_by_id", None)
+            if bm_map:
+                names = sorted({v for v in bm_map.values() if isinstance(v, str) and v.strip()})
+                bm_options.extend(names)
+        except Exception:
+            pass
+        bm_combo = ttk.Combobox(
+            bm_frame, textvariable=bm_var, values=bm_options, state="readonly", width=24
+        )
+        bm_combo.pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Label(bm_frame, text="- = legjobb elérhető odds").pack(side=tk.LEFT)
+        bm_combo.bind("<<ComboboxSelected>>", lambda _e: _refresh_daily_stats_window(state))
+
         # Table
         cols = (
             "D\u00e1tum",
@@ -2585,8 +2621,8 @@ def _open_daily_stats_window(state: AppState) -> None:
             tv.column(c, width=widths.get(c, 100), anchor=("w" if c == "D\u00e1tum" else "center"))
         vsb = ttk.Scrollbar(win, orient="vertical", command=tv.yview)
         tv.configure(yscrollcommand=vsb.set)
-        tv.grid(row=4, column=0, sticky="nsew", padx=(6, 0), pady=(0, 6))
-        vsb.grid(row=4, column=1, sticky="ns", pady=(0, 6))
+        tv.grid(row=5, column=0, sticky="nsew", padx=(6, 0), pady=(0, 6))
+        vsb.grid(row=5, column=1, sticky="ns", pady=(0, 6))
         try:
             tv.tag_configure("roi_pos", foreground="#006400")
             tv.tag_configure("roi_neg", foreground="#8b0000")
@@ -2605,7 +2641,7 @@ def _open_daily_stats_window(state: AppState) -> None:
 
         # Chart
         chart_frame = ttk.Frame(win)
-        chart_frame.grid(row=5, column=0, columnspan=2, sticky="nsew", padx=6, pady=(0, 6))
+        chart_frame.grid(row=6, column=0, columnspan=2, sticky="nsew", padx=6, pady=(0, 6))
         try:
             from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
             from matplotlib.figure import Figure
@@ -2614,7 +2650,7 @@ def _open_daily_stats_window(state: AppState) -> None:
             ax = fig.add_subplot(111)
             # Leave space for rotated x-labels
             try:
-                fig.subplots_adjust(bottom=0.22)
+                fig.subplots_adjust(bottom=0.3)
             except Exception:
                 pass
             canvas = FigureCanvasTkAgg(fig, master=chart_frame)
@@ -2633,7 +2669,7 @@ def _open_daily_stats_window(state: AppState) -> None:
 
         # Refresh button
         btn_bar = ttk.Frame(win)
-        btn_bar.grid(row=6, column=0, columnspan=2, sticky="we", padx=6, pady=(0, 8))
+        btn_bar.grid(row=7, column=0, columnspan=2, sticky="we", padx=6, pady=(0, 8))
         ttk.Button(
             btn_bar, text="Friss\u00edt\u00e9s", command=lambda: _refresh_daily_stats_window(state)
         ).pack(side=tk.LEFT)
