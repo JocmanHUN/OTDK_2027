@@ -991,6 +991,8 @@ class AppState:
     bm_combo: ttk.Combobox | None = None
     model_combo_var: tk.StringVar | None = None
     model_combo: ttk.Combobox | None = None
+    upcoming_odds_var: tk.StringVar | None = None
+    upcoming_ev_var: tk.StringVar | None = None
     model_visibility: Dict[str, bool] | None = None
     model_visibility_vars: Dict[str, tk.BooleanVar] | None = None
     search_var: tk.StringVar | None = None
@@ -1023,12 +1025,14 @@ class AppState:
     daily_top_n_var: tk.StringVar | None = None
     daily_ev_range_var: tk.StringVar | None = None
     daily_odds_range_var: tk.StringVar | None = None
+    daily_bm_var: tk.StringVar | None = None
     league_stats_window: Any | None = None
     league_stats_tree: ttk.Treeview | None = None
     league_stats_info_var: tk.StringVar | None = None
     league_top_n_var: tk.StringVar | None = None
     league_ev_range_var: tk.StringVar | None = None
     league_odds_range_var: tk.StringVar | None = None
+    league_bm_var: tk.StringVar | None = None
     league_search_var: tk.StringVar | None = None
     league_side_btn: Any | None = None
     league_sort_col: str | None = None
@@ -1972,6 +1976,105 @@ def _show_daily_match_details(state: AppState, day_key: str) -> None:
         pass
 
 
+def _show_league_match_details(state: AppState, league_key: str) -> None:
+    """Popup listing matches contributing to the selected league row."""
+    if not league_key:
+        return
+    details_map = getattr(state, "league_match_details", {}) or {}
+    matches = details_map.get(league_key)
+    if not matches:
+        try:
+            messagebox.showinfo("Liga meccsek", "Ehhez a ligához nincs megjeleníthető meccs.")
+        except Exception:
+            pass
+        return
+
+    try:
+        existing = getattr(state, "league_match_popup", None)
+    except Exception:
+        existing = None
+    try:
+        if existing is not None and existing.winfo_exists():
+            existing.destroy()
+    except Exception:
+        pass
+
+    win = tk.Toplevel()
+    win.title("Liga meccsek")
+    cols = ("Idő", "Meccs", "Eredmény", "Tipp", "Odds", "EV", "Fogadóiroda", "Profit")
+    tv = ttk.Treeview(win, columns=cols, show="headings", height=12)
+    widths = {
+        "Idő": 130,
+        "Meccs": 190,
+        "Eredmény": 80,
+        "Tipp": 70,
+        "Odds": 80,
+        "EV": 90,
+        "Fogadóiroda": 130,
+        "Profit": 80,
+    }
+    for c in cols:
+        tv.heading(c, text=c)
+        tv.column(
+            c,
+            width=widths.get(c, 100),
+            anchor="w" if c in {"Idő", "Meccs", "Fogadóiroda"} else "center",
+        )
+
+    vsb = ttk.Scrollbar(win, orient="vertical", command=tv.yview)
+    tv.configure(yscrollcommand=vsb.set)
+    tv.grid(row=0, column=0, sticky="nsew", padx=(6, 0), pady=6)
+    vsb.grid(row=0, column=1, sticky="ns", pady=6)
+
+    for m in matches:
+        home = m.get("home")
+        away = m.get("away")
+        rr = m.get("real_result")
+        pred = m.get("predicted")
+        odd_val = m.get("odd")
+        ev_val = m.get("ev")
+        bm_name = m.get("bookmaker_name") or (
+            f"ID {m.get('bookmaker_id')}" if m.get("bookmaker_id") else "-"
+        )
+        profit = float(m.get("profit", 0.0) or 0.0)
+        profit_str = f"{profit:+.2f}"
+        win_flag = profit > 0.0
+        match_label = f"{home} - {away}"
+        result_label = f"{rr} ({'nyert' if win_flag else 'vesztett'})"
+        tv.insert(
+            "",
+            "end",
+            values=(
+                m.get("kickoff"),
+                match_label,
+                result_label,
+                pred,
+                f"{odd_val:.2f}" if isinstance(odd_val, (int, float)) else "-",
+                f"{ev_val:+.3f}" if isinstance(ev_val, (int, float)) else "-",
+                bm_name,
+                profit_str,
+            ),
+            tags=("win",) if win_flag else ("loss",),
+        )
+
+    try:
+        tv.tag_configure("win", foreground="#006400")
+        tv.tag_configure("loss", foreground="#8b0000")
+    except Exception:
+        pass
+
+    try:
+        win.grid_columnconfigure(0, weight=1)
+        win.grid_rowconfigure(0, weight=1)
+    except Exception:
+        pass
+
+    try:
+        state.league_match_popup = win  # type: ignore[attr-defined]
+    except Exception:
+        pass
+
+
 def _compute_league_stats(
     state: AppState,
 ) -> tuple[list[dict[str, Any]], dict[str, float | int | None]]:
@@ -1989,7 +2092,24 @@ def _compute_league_stats(
     except Exception:
         search_q = ""
 
-    use_bm = state.selected_bookmaker_id
+    # Bookmaker selection specific to league stats (dropdown) overrides main selection
+    bm_choice_name = "-"
+    try:
+        bm_var = getattr(state, "league_bm_var", None)
+        bm_choice_name = bm_var.get().strip() if bm_var is not None else "-"
+    except Exception:
+        bm_choice_name = "-"
+    use_bm: int | None = None
+    if bm_choice_name and bm_choice_name != "-":
+        try:
+            bm_map = getattr(state, "bm_names_by_id", None) or {}
+            rev = {v: k for k, v in bm_map.items()}
+            use_bm = rev.get(bm_choice_name)
+        except Exception:
+            use_bm = None
+    elif getattr(state, "selected_bookmaker_id", None) is not None:
+        use_bm = state.selected_bookmaker_id
+    setattr(state, "league_selected_bookmaker_id", use_bm)
     exclude_ext = bool(getattr(state, "exclude_extremes", False))
 
     top_n_var = getattr(state, "league_top_n_var", None)
@@ -2009,30 +2129,43 @@ def _compute_league_stats(
     odds_range_map = {label: (low, high) for (label, low, high) in ODDS_BINS}
     odds_bounds: tuple[float | None, float | None] | None = odds_range_map.get(odds_label)
 
-    odds_by_match: Dict[int, Tuple[float, float, float]] = {}
-    if use_bm is None:
-        try:
-            for mid, oh, od, oa in conn.execute(
-                "SELECT match_id, MAX(odds_home), MAX(odds_draw), MAX(odds_away) FROM odds GROUP BY match_id"
+    odds_by_match: Dict[int, Dict[str, Tuple[float, int | None]]] = {}
+    try:
+        if use_bm is None:
+            # Build best odds per outcome across all bookmakers
+            for mid, bid, oh, od, oa in conn.execute(
+                "SELECT match_id, bookmaker_id, odds_home, odds_draw, odds_away FROM odds"
             ).fetchall():
                 try:
-                    odds_by_match[int(mid)] = (float(oh), float(od), float(oa))
+                    mid_i = int(mid)
+                    bid_i = int(bid) if bid is not None else None
+                    bucket = odds_by_match.setdefault(mid_i, {})
+                    for outcome, val in (("1", oh), ("X", od), ("2", oa)):
+                        try:
+                            odd_f = float(val)
+                        except Exception:
+                            continue
+                        cur = bucket.get(outcome)
+                        if cur is None or odd_f > cur[0]:
+                            bucket[outcome] = (odd_f, bid_i)
                 except Exception:
                     continue
-        except Exception:
-            odds_by_match = {}
-    else:
-        try:
+        else:
             for mid, oh, od, oa in conn.execute(
                 "SELECT match_id, odds_home, odds_draw, odds_away FROM odds WHERE bookmaker_id = ?",
                 (int(use_bm),),
             ).fetchall():
                 try:
-                    odds_by_match[int(mid)] = (float(oh), float(od), float(oa))
+                    mid_i = int(mid)
+                    odds_by_match[mid_i] = {
+                        "1": (float(oh), int(use_bm)),
+                        "X": (float(od), int(use_bm)),
+                        "2": (float(oa), int(use_bm)),
+                    }
                 except Exception:
                     continue
-        except Exception:
-            odds_by_match = {}
+    except Exception:
+        odds_by_match = {}
 
     model_keys = _alias_keys_for(str(model_key))
     placeholders = ",".join("?" for _ in model_keys) or "?"
@@ -2059,22 +2192,20 @@ def _compute_league_stats(
             """,
             tuple(model_keys),
         )
-        rows = cur.fetchall()
+        rows = list(cur.fetchall())  # type: ignore[union-attr]
     except Exception:
         rows = []
 
     xg_map = _get_xg_league_map()
 
     leagues: Dict[int, dict[str, Any]] = {}
+    league_details: Dict[str, list[dict[str, Any]]] = {}
+    bm_map_global = getattr(state, "bm_names_by_id", None) or {}
     for mid, date_s, home, away, rr, lid, lname, lcountry, ph, pd, pa, pref in rows:
         try:
             lid_int = _maybe_int(lid)
             if lid_int is None:
                 continue
-            odds_trip = odds_by_match.get(int(mid))
-            if not odds_trip:
-                continue
-            oh, od, oa = odds_trip
             phf, pdf, paf = float(ph), float(pd), float(pa)
             pref_str = str(pref)
             if pref_str in {"1", "X", "2"}:
@@ -2082,7 +2213,13 @@ def _compute_league_stats(
             else:
                 vals_sel = [("1", phf), ("X", pdf), ("2", paf)]
                 sel, _ = max(vals_sel, key=lambda x: x[1])
-            odd_val = oh if sel == "1" else (od if sel == "X" else oa)
+            odds_trip = odds_by_match.get(int(mid))
+            if not odds_trip or sel not in odds_trip:
+                continue
+            odd_val_entry = odds_trip.get(sel)
+            if not odd_val_entry:
+                continue
+            odd_val, bid = odd_val_entry
             if odd_val is None or float(odd_val) <= 0.0:
                 continue
             if odds_bounds is not None:
@@ -2124,6 +2261,7 @@ def _compute_league_stats(
 
             league_label = f"{league_name} ({country_val})" if country_val else league_name
             dt_ts = None
+            dt_obj = None
             try:
                 if isinstance(date_s, str):
                     dt_obj = datetime.fromisoformat(str(date_s))
@@ -2142,12 +2280,13 @@ def _compute_league_stats(
             profit = (float(odd_val) - 1.0) if win else -1.0
             odds_bucket = _odds_bin_label(float(odd_val))
             ev_bucket = _ev_bin_label(ev)
+            bm_name = bm_map_global.get(int(bid), None) if bid is not None else None
 
-            bucket = leagues.get(int(lid_int))
-            if bucket is None:
-                bucket = {"label": league_label, "matches": []}
-                leagues[int(lid_int)] = bucket
-            bucket["matches"].append(
+            league_bucket = leagues.get(int(lid_int))
+            if league_bucket is None:
+                league_bucket = {"label": league_label, "matches": []}
+                leagues[int(lid_int)] = league_bucket
+            league_bucket["matches"].append(
                 {
                     "ev": ev,
                     "win": win,
@@ -2156,6 +2295,14 @@ def _compute_league_stats(
                     "ev_bin": ev_bucket,
                     "ts": dt_ts,
                     "mid": int(mid),
+                    "home": home,
+                    "away": away,
+                    "real_result": str(rr),
+                    "predicted": sel,
+                    "odd": float(odd_val),
+                    "bookmaker_id": bid,
+                    "bookmaker_name": bm_name,
+                    "kickoff": dt_obj if "dt_obj" in locals() else None,
                 }
             )
         except Exception:
@@ -2237,8 +2384,29 @@ def _compute_league_stats(
         except Exception:
             max_dd_l = 0.0
 
+        league_key = str(lid)
+        league_details[league_key] = [
+            {
+                "kickoff": (
+                    m.get("kickoff").strftime("%Y-%m-%d %H:%M") if m.get("kickoff") else None
+                ),
+                "home": m.get("home"),
+                "away": m.get("away"),
+                "real_result": m.get("real_result"),
+                "predicted": m.get("predicted"),
+                "odd": m.get("odd"),
+                "ev": m.get("ev"),
+                "bookmaker_id": m.get("bookmaker_id"),
+                "bookmaker_name": m.get("bookmaker_name"),
+                "profit": m.get("profit"),
+                "win": m.get("win"),
+            }
+            for m in selected
+        ]
+
         rows_out.append(
             {
+                "league_key": league_key,
                 "league_label": data.get("label", str(lid)),
                 "count": cnt,
                 "hit_rate": hit_rate,
@@ -2285,6 +2453,7 @@ def _compute_league_stats(
         "std": std_val,
         "max_drawdown": max_dd if profits_per_league else None,
     }
+    setattr(state, "league_match_details", league_details)
     return rows_out, summary
 
 
@@ -2516,7 +2685,15 @@ def _open_daily_stats_window(state: AppState) -> None:
     if win is None:
         win = tk.Toplevel()
         win.title("Napi statisztika")
-        win.geometry("950x520")
+        win.geometry("1100x720")
+        try:
+            win.minsize(1000, 650)
+        except Exception:
+            pass
+        try:
+            win.minsize(850, 480)
+        except Exception:
+            pass
 
         info_var = tk.StringVar(value="Napi statisztika")
         state.daily_stats_info_var = info_var
@@ -2574,7 +2751,7 @@ def _open_daily_stats_window(state: AppState) -> None:
         bm_frame.grid(row=4, column=0, columnspan=2, sticky="w", padx=6, pady=(0, 6))
         ttk.Label(bm_frame, text="Fogadóiroda:").pack(side=tk.LEFT, padx=(0, 6))
         bm_var = tk.StringVar(value="-")
-        setattr(state, "daily_bm_var", bm_var)
+        state.daily_bm_var = bm_var
         bm_options = ["-"]
         try:
             bm_map = getattr(state, "bm_names_by_id", None)
@@ -2693,8 +2870,9 @@ def _open_daily_stats_window(state: AppState) -> None:
         except Exception:
             pass
 
-        win.grid_rowconfigure(1, weight=1)
-        win.grid_rowconfigure(2, weight=1)
+        # Let the table and chart rows take the available height; keep filter rows compact
+        win.grid_rowconfigure(4, weight=3)  # table
+        win.grid_rowconfigure(5, weight=2)  # chart
         win.grid_columnconfigure(0, weight=1)
         state.daily_stats_window = win
 
@@ -2712,6 +2890,7 @@ def _refresh_league_stats_window(state: AppState) -> None:
     tv = getattr(state, "league_stats_tree", None)
     if win is None or tv is None:
         return
+    setattr(state, "league_match_details", {})
 
     info_var = getattr(state, "league_stats_info_var", None)
 
@@ -2778,6 +2957,7 @@ def _refresh_league_stats_window(state: AppState) -> None:
             tv.insert(
                 "",
                 "end",
+                iid=str(r.get("league_key") or r.get("league_label") or ""),
                 values=[
                     r.get("league_label", "-"),
                     r.get("count"),
@@ -2823,6 +3003,10 @@ def _open_league_stats_window(state: AppState) -> None:
         win = tk.Toplevel()
         win.title("Liga statisztik\u00e1k")
         win.geometry("1150x560")
+        try:
+            win.minsize(950, 520)
+        except Exception:
+            pass
 
         info_var = tk.StringVar(value="Liga statisztik\u00e1k")
         state.league_stats_info_var = info_var
@@ -2833,7 +3017,7 @@ def _open_league_stats_window(state: AppState) -> None:
         # Filters
         filter_frame = ttk.Frame(win)
         filter_frame.grid(row=1, column=0, columnspan=2, sticky="we", padx=6, pady=(0, 4))
-        filter_frame.grid_columnconfigure(5, weight=1)
+        filter_frame.grid_columnconfigure(9, weight=1)
 
         ttk.Label(filter_frame, text="Liga keres\u00e9s:").grid(row=0, column=0, sticky="w")
         league_search_var = tk.StringVar(value="")
@@ -2874,6 +3058,24 @@ def _open_league_stats_window(state: AppState) -> None:
         )
         odds_combo.grid(row=0, column=7, sticky="w")
         odds_combo.bind("<<ComboboxSelected>>", lambda _e: _refresh_league_stats_window(state))
+
+        ttk.Label(filter_frame, text="Fogadóiroda:").grid(row=0, column=8, sticky="w")
+        league_bm_var = tk.StringVar(value="-")
+        state.league_bm_var = league_bm_var
+        bm_options = ["-"]
+        try:
+            bm_map_local = getattr(state, "bm_names_by_id", None) or {}
+            if bm_map_local:
+                bm_options.extend(
+                    sorted({v for v in bm_map_local.values() if isinstance(v, str) and v.strip()})
+                )
+        except Exception:
+            pass
+        league_bm_combo = ttk.Combobox(
+            filter_frame, textvariable=league_bm_var, values=bm_options, state="readonly", width=20
+        )
+        league_bm_combo.grid(row=0, column=9, sticky="w", padx=(4, 0))
+        league_bm_combo.bind("<<ComboboxSelected>>", lambda _e: _refresh_league_stats_window(state))
 
         # Table
         cols = (
@@ -2928,6 +3130,15 @@ def _open_league_stats_window(state: AppState) -> None:
         try:
             tv.tag_configure("roi_pos", foreground="#006400")
             tv.tag_configure("roi_neg", foreground="#8b0000")
+        except Exception:
+            pass
+        try:
+            tv.bind(
+                "<Double-1>",
+                lambda _e: _show_league_match_details(
+                    state, cast(str, tv.selection()[0]) if tv.selection() else ""
+                ),
+            )
         except Exception:
             pass
         state.league_stats_tree = tv
@@ -3121,6 +3332,22 @@ def refresh_table(state: AppState, *, allow_network: bool = True) -> None:
     # Apply free-text team filter if provided
     q = (state.search_var.get() if state.search_var is not None else "").strip().lower()
 
+    odds_bounds: tuple[float | None, float | None] | None = None
+    ev_bounds: tuple[float, float] | None = None
+    if not getattr(state, "show_played", False):
+        try:
+            odds_label = state.upcoming_odds_var.get().strip() if state.upcoming_odds_var else "-"
+            odds_map = {label: (low, high) for (label, low, high) in ODDS_BINS}
+            odds_bounds = odds_map.get(odds_label)
+        except Exception:
+            odds_bounds = None
+        try:
+            ev_label = state.upcoming_ev_var.get().strip() if state.upcoming_ev_var else "-"
+            ev_map = {label: (low, high) for (label, low, high) in EV_BINS}
+            ev_bounds = ev_map.get(ev_label)
+        except Exception:
+            ev_bounds = None
+
     filtered: list[Tuple[Any, ...]] = []
     for mid, dt_s, home, away in matches:
         # Text filter on "home - away"
@@ -3190,6 +3417,84 @@ def refresh_table(state: AppState, *, allow_network: bool = True) -> None:
                     continue
         except Exception:
             pass
+        # Upcoming-view EV/odds filters (only apply when a model is selected)
+        apply_odds_filter = (odds_bounds is not None) and (not getattr(state, "show_played", False))
+        apply_ev_filter = (ev_bounds is not None) and (not getattr(state, "show_played", False))
+        if apply_odds_filter or apply_ev_filter:
+            if state.selected_model_key is None:
+                continue
+            trip_sel_filt = model_map.get(state.selected_model_key)
+            if not trip_sel_filt:
+                continue
+            phf, pdf, paf, preff = trip_sel_filt
+            if isinstance(preff, str) and preff in {"1", "X", "2"}:
+                sel_lbl_filt = preff
+            else:
+                vals_filt = [("1", float(phf)), ("X", float(pdf)), ("2", float(paf))]
+                sel_lbl_filt, _ = max(vals_filt, key=lambda x: x[1])
+            odd_val_filt: float | None = None
+            if state.selected_bookmaker_id is not None:
+                try:
+                    cur_match = state.conn.execute(
+                        "SELECT odds_home, odds_draw, odds_away FROM odds WHERE match_id = ? AND bookmaker_id = ? LIMIT 1",
+                        (int(mid), int(state.selected_bookmaker_id)),
+                    )
+                    r_match = cur_match.fetchone()
+                except Exception:
+                    r_match = None
+                if r_match is not None:
+                    try:
+                        oh_f, od_f, oa_f = float(r_match[0]), float(r_match[1]), float(r_match[2])
+                        odd_val_filt = (
+                            oh_f if sel_lbl_filt == "1" else (od_f if sel_lbl_filt == "X" else oa_f)
+                        )
+                    except Exception:
+                        odd_val_filt = None
+            else:
+                try:
+                    best_vals: Dict[str, float] = {
+                        "1": float("-inf"),
+                        "X": float("-inf"),
+                        "2": float("-inf"),
+                    }
+                    cur_best = state.conn.execute(
+                        "SELECT odds_home, odds_draw, odds_away FROM odds WHERE match_id = ?",
+                        (int(mid),),
+                    )
+                    for oh, od, oa in cur_best.fetchall():
+                        try:
+                            ohf, odf, oaf = float(oh), float(od), float(oa)
+                            if ohf > best_vals["1"]:
+                                best_vals["1"] = ohf
+                            if odf > best_vals["X"]:
+                                best_vals["X"] = odf
+                            if oaf > best_vals["2"]:
+                                best_vals["2"] = oaf
+                        except Exception:
+                            continue
+                    best_pick = best_vals.get(sel_lbl_filt, float("-inf"))
+                    if best_pick > 0.0 and best_pick != float("-inf"):
+                        odd_val_filt = best_pick
+                except Exception:
+                    odd_val_filt = None
+            if odd_val_filt is None or odd_val_filt <= 0.0:
+                continue
+            if apply_odds_filter and odds_bounds is not None:
+                low_o, high_o = odds_bounds
+                if (low_o is not None and odd_val_filt < low_o) or (
+                    high_o is not None and odd_val_filt > high_o
+                ):
+                    continue
+            if apply_ev_filter and ev_bounds is not None:
+                p_sel = (
+                    float(phf)
+                    if sel_lbl_filt == "1"
+                    else (float(pdf) if sel_lbl_filt == "X" else float(paf))
+                )
+                ev_val = p_sel * float(odd_val_filt) - 1.0
+                low_e, high_e = ev_bounds
+                if not (ev_val >= low_e and (ev_val < high_e or high_e == float("inf"))):
+                    continue
         values = [disp_dt, f"{home} - {away}", result_str]
         # If a bookmaker is selected, pull odds once per match to render beneath the probabilities
         match_odds: Tuple[float, float, float] | None = None
@@ -3279,6 +3584,10 @@ def refresh_table(state: AppState, *, allow_network: bool = True) -> None:
                             ev_cell = f"{ev_pct:+.0f}%"
             except Exception:
                 best_text = ""
+            if not best_text:
+                best_text = "-"
+            if not ev_cell:
+                ev_cell = "-"
             values.append(best_text)
             # Append EV cell right after the tip-odds column
             values.append(ev_cell)
@@ -3894,6 +4203,10 @@ def run_app() -> None:
     root = tk.Tk()
     root.title("Holnapi meccsek \u00e9s predikci\u00f3k")
     root.geometry("1200x600")
+    try:
+        root.minsize(1150, 620)
+    except Exception:
+        pass
     # Ensure proper accented title regardless of source encoding
     try:
         root.title("Holnapi meccsek \u00e9s predikci\u00f3k")
@@ -4061,7 +4374,7 @@ def run_app() -> None:
 
     # Controls
     btn_frame = ttk.Frame(root)
-    btn_frame.grid(row=2, column=0, pady=8, sticky="w")
+    btn_frame.grid(row=2, column=0, columnspan=3, pady=8, sticky="w")
 
     # Normalize any incorrectly encoded texts on labels/buttons (best-effort)
     try:
@@ -4225,6 +4538,27 @@ def run_app() -> None:
     model_combo.pack(side=tk.LEFT, padx=(0, 12))
     state.model_combo_var = model_var
     state.model_combo = model_combo
+
+    # Odds filter (upcoming view)
+    ttk.Label(btn_frame, text="Odds szűrő:").pack(side=tk.LEFT, padx=(0, 6))
+    upcoming_odds_var = tk.StringVar(value="-")
+    odds_options = ["-"] + [lbl for (lbl, _lo, _hi) in ODDS_BINS]
+    odds_combo = ttk.Combobox(
+        btn_frame, textvariable=upcoming_odds_var, state="readonly", width=18, values=odds_options
+    )
+    odds_combo.pack(side=tk.LEFT, padx=(0, 12))
+    state.upcoming_odds_var = upcoming_odds_var
+
+    # EV filter (upcoming view)
+    ttk.Label(btn_frame, text="EV szűrő:").pack(side=tk.LEFT, padx=(0, 6))
+    upcoming_ev_var = tk.StringVar(value="-")
+    ev_options = ["-"] + [lbl for (lbl, _lo, _hi) in EV_BINS]
+    ev_combo = ttk.Combobox(
+        btn_frame, textvariable=upcoming_ev_var, state="readonly", width=16, values=ev_options
+    )
+    ev_combo.pack(side=tk.LEFT, padx=(0, 12))
+    state.upcoming_ev_var = upcoming_ev_var
+
     state.bankroll_amount = None
 
     # Bankroll input for Kelly stake suggestion
@@ -4395,6 +4729,7 @@ def run_app() -> None:
             state.show_played = not bool(getattr(state, "show_played", False))
             _apply_displaycolumns()
             _update_odds_headers()
+            _update_filter_enablement()
             try:
                 _update_winners_filter_visibility()
             except Exception:
@@ -4602,6 +4937,24 @@ def run_app() -> None:
         except Exception:
             pass
 
+    def _update_filter_enablement() -> None:
+        try:
+            disable_upcoming = (not getattr(state, "show_played", False)) and (
+                state.selected_model_key is None
+            )
+
+            def _set_state(combo: ttk.Combobox, disabled: bool) -> None:
+                try:
+                    combo.configure(state="disabled" if disabled else "readonly")
+                except Exception:
+                    pass
+
+            _set_state(bm_combo, disable_upcoming)
+            _set_state(odds_combo, disable_upcoming)
+            _set_state(ev_combo, disable_upcoming)
+        except Exception:
+            pass
+
     bm_combo.bind("<<ComboboxSelected>>", _on_bm_selected)
 
     # Populate model list and handle selection
@@ -4629,11 +4982,29 @@ def run_app() -> None:
                 _update_daily_btn_state()
             except Exception:
                 pass
+            try:
+                _update_filter_enablement()
+            except Exception:
+                pass
+            refresh_table(state, allow_network=False)
+        except Exception:
+            pass
+
+    def _on_upcoming_odds_selected(event: object) -> None:
+        try:
+            refresh_table(state, allow_network=False)
+        except Exception:
+            pass
+
+    def _on_upcoming_ev_selected(event: object) -> None:
+        try:
             refresh_table(state, allow_network=False)
         except Exception:
             pass
 
     model_combo.bind("<<ComboboxSelected>>", _on_model_selected)
+    odds_combo.bind("<<ComboboxSelected>>", _on_upcoming_odds_selected)
+    ev_combo.bind("<<ComboboxSelected>>", _on_upcoming_ev_selected)
 
     ttk.Button(
         btn_frame,
@@ -4683,6 +5054,7 @@ def run_app() -> None:
         _refresh_model_list()
         _apply_displaycolumns()
         _update_odds_headers()
+        _update_filter_enablement()
         try:
             status_var.set("K\u00e9sz.")
         except Exception:
