@@ -1620,14 +1620,21 @@ def _compute_daily_model_stats(
         odds_bounds = odds_range_map[odds_label]
 
     # Preload odds per match (selected bookmaker or best available)
-    odds_by_match: Dict[int, Tuple[float, float, float]] = {}
+    odds_by_match: Dict[int, Tuple[float, float, float, int | None]] = {}
     if use_bm is None:
         try:
-            for mid, oh, od, oa in conn.execute(
-                "SELECT match_id, MAX(odds_home), MAX(odds_draw), MAX(odds_away) FROM odds GROUP BY match_id"
+            for mid, bid, oh, od, oa in conn.execute(
+                """
+                SELECT o.match_id, o.bookmaker_id, o.odds_home, o.odds_draw, o.odds_away
+                FROM odds o
+                JOIN (
+                    SELECT match_id, MAX(odds_home) AS mh FROM odds GROUP BY match_id
+                ) m ON o.match_id = m.match_id AND o.odds_home = m.mh
+                """
             ).fetchall():
                 try:
-                    odds_by_match[int(mid)] = (float(oh), float(od), float(oa))
+                    bid_int = int(bid) if bid is not None else None
+                    odds_by_match[int(mid)] = (float(oh), float(od), float(oa), bid_int)
                 except Exception:
                     continue
         except Exception:
@@ -1639,7 +1646,7 @@ def _compute_daily_model_stats(
                 (int(use_bm),),
             ).fetchall():
                 try:
-                    odds_by_match[int(mid)] = (float(oh), float(od), float(oa))
+                    odds_by_match[int(mid)] = (float(oh), float(od), float(oa), int(use_bm))
                 except Exception:
                     continue
         except Exception:
@@ -1664,6 +1671,7 @@ def _compute_daily_model_stats(
         rows = []
 
     daily_matches: Dict[str, list[dict[str, Any]]] = {}
+    daily_details: Dict[str, list[dict[str, Any]]] = {}
     total_profit = 0.0
 
     for mid, date_s, home, away, rr, ph, pd, pa, pref in rows:
@@ -1675,7 +1683,13 @@ def _compute_daily_model_stats(
             odds_trip = odds_by_match.get(int(mid))
             if not odds_trip:
                 continue
-            oh, od, oa = odds_trip
+            oh, od, oa, bid = odds_trip
+            bm_name = None
+            try:
+                if hasattr(state, "bm_names_by_id") and state.bm_names_by_id is not None:
+                    bm_name = state.bm_names_by_id.get(int(bid))
+            except Exception:
+                bm_name = None
             phf, pdf, paf = float(ph), float(pd), float(pa)
             pref_str = str(pref)
             if pref_str in {"1", "X", "2"}:
@@ -1701,6 +1715,7 @@ def _compute_daily_model_stats(
                 if not (ev >= low_b and (ev < high_b or high_b == float("inf"))):
                     continue
 
+            dt = None
             try:
                 dt = datetime.fromisoformat(str(date_s))
                 if dt.tzinfo is None:
@@ -1717,6 +1732,7 @@ def _compute_daily_model_stats(
 
             win = str(rr) == sel
             profit = (float(odd_val) - 1.0) if win else -1.0
+            match_label = f"{home} - {away}"
 
             bucket = daily_matches.get(day_key)
             if bucket is None:
@@ -1727,6 +1743,18 @@ def _compute_daily_model_stats(
                     "ev": ev,
                     "win": win,
                     "profit": profit,
+                    "match_id": int(mid),
+                    "date": day_key,
+                    "kickoff": dt,
+                    "home": home,
+                    "away": away,
+                    "real_result": str(rr),
+                    "predicted": sel,
+                    "odd": float(odd_val),
+                    "bookmaker_id": bid,
+                    "bookmaker_name": bm_name,
+                    "match_label": match_label,
+                    "odds_triplet": (oh, od, oa),
                 }
             )
         except Exception:
@@ -1767,6 +1795,26 @@ def _compute_daily_model_stats(
         hit_pos = (pos_wins / pos_cnt * 100.0) if pos_cnt else None
         hit_neg = (neg_wins / neg_cnt * 100.0) if neg_cnt else None
         daily_profit_list.append(profit_all)
+        daily_details[day] = [
+            {
+                "kickoff": (
+                    m.get("kickoff").strftime("%Y-%m-%d %H:%M")  # type: ignore[union-attr]
+                    if m.get("kickoff") is not None
+                    else m.get("date")
+                ),
+                "home": m.get("home"),
+                "away": m.get("away"),
+                "real_result": m.get("real_result"),
+                "predicted": m.get("predicted"),
+                "odd": m.get("odd"),
+                "bookmaker_id": m.get("bookmaker_id"),
+                "bookmaker_name": m.get("bookmaker_name"),
+                "profit": m.get("profit"),
+                "ev": m.get("ev"),
+            }
+            for m in selected
+        ]
+
         rows_out.append(
             {
                 "date": day,
@@ -1800,7 +1848,107 @@ def _compute_daily_model_stats(
 
     risk = {"std": std_val, "max_drawdown": max_dd if daily_profit_list else None}
 
+    # Store details for row click popup
+    setattr(state, "daily_match_details", daily_details)
+
     return rows_out, cumulative, total_profit, risk
+
+
+def _show_daily_match_details(state: AppState, day_key: str) -> None:
+    """Open a popup listing matches contributing to the selected daily row."""
+    if not day_key:
+        return
+    details_map = getattr(state, "daily_match_details", {}) or {}
+    matches = details_map.get(day_key)
+    if not matches:
+        try:
+            messagebox.showinfo("Napi meccsek", "Ehhez a naphoz nincs megjeleníthető meccs.")
+        except Exception:
+            pass
+        return
+
+    # Reuse / replace previous popup
+    try:
+        existing = getattr(state, "daily_match_popup", None)
+    except Exception:
+        existing = None
+    try:
+        if existing is not None and existing.winfo_exists():
+            existing.destroy()
+    except Exception:
+        pass
+
+    win = tk.Toplevel()
+    win.title(f"Napi meccsek - {day_key}")
+    cols = ("Idő", "Meccs", "Eredmény", "Tipp", "Odds", "Fogadóiroda", "Profit")
+    tv = ttk.Treeview(win, columns=cols, show="headings", height=12)
+    widths = {
+        "Idő": 130,
+        "Meccs": 190,
+        "Eredmény": 80,
+        "Tipp": 70,
+        "Odds": 80,
+        "Fogadóiroda": 130,
+        "Profit": 80,
+    }
+    for c in cols:
+        tv.heading(c, text=c)
+        tv.column(
+            c,
+            width=widths.get(c, 100),
+            anchor="w" if c in {"Idő", "Meccs", "Fogadóiroda"} else "center",
+        )
+
+    vsb = ttk.Scrollbar(win, orient="vertical", command=tv.yview)
+    tv.configure(yscrollcommand=vsb.set)
+    tv.grid(row=0, column=0, sticky="nsew", padx=(6, 0), pady=6)
+    vsb.grid(row=0, column=1, sticky="ns", pady=6)
+
+    for m in matches:
+        home = m.get("home")
+        away = m.get("away")
+        rr = m.get("real_result")
+        pred = m.get("predicted")
+        odd_val = m.get("odd")
+        bm_name = m.get("bookmaker_name") or (
+            f"ID {m.get('bookmaker_id')}" if m.get("bookmaker_id") else "-"
+        )
+        profit = float(m.get("profit", 0.0) or 0.0)
+        profit_str = f"{profit:+.2f}"
+        win_flag = profit > 0.0
+        match_label = f"{home} - {away}"
+        result_label = f"{rr} ({'nyert' if win_flag else 'vesztett'})"
+        tv.insert(
+            "",
+            "end",
+            values=(
+                m.get("kickoff") or m.get("date"),
+                match_label,
+                result_label,
+                pred,
+                f"{odd_val:.2f}" if isinstance(odd_val, (int, float)) else "-",
+                bm_name,
+                profit_str,
+            ),
+            tags=("win",) if win_flag else ("loss",),
+        )
+
+    try:
+        tv.tag_configure("win", foreground="#006400")
+        tv.tag_configure("loss", foreground="#8b0000")
+    except Exception:
+        pass
+
+    try:
+        win.grid_columnconfigure(0, weight=1)
+        win.grid_rowconfigure(0, weight=1)
+    except Exception:
+        pass
+
+    try:
+        state.daily_match_popup = win  # type: ignore[attr-defined]
+    except Exception:
+        pass
 
 
 def _compute_league_stats(
@@ -2124,6 +2272,7 @@ def _refresh_daily_stats_window(state: AppState) -> None:
     tv = getattr(state, "daily_stats_tree", None)
     if win is None or tv is None:
         return
+    setattr(state, "daily_match_details", {})
 
     info_var = getattr(state, "daily_stats_info_var", None)
     ax = getattr(state, "daily_profit_ax", None)
@@ -2255,6 +2404,7 @@ def _refresh_daily_stats_window(state: AppState) -> None:
             tv.insert(
                 "",
                 "end",
+                iid=str(r.get("date") or ""),
                 values=[
                     r.get("date"),
                     r.get("count"),
@@ -2281,13 +2431,26 @@ def _refresh_daily_stats_window(state: AppState) -> None:
                 ys = [p[1] for p in cumulative]
                 labels = [p[0] for p in cumulative]
                 ax.plot(xs, ys, marker="o", color="#1f77b4")
+                # Reduce x-label clutter: show at most ~12 readable labels, keep last
+                tick_idx = xs
+                tick_labels = labels
+                if labels:
+                    step = max(1, math.ceil(len(labels) / 12))
+                    tick_idx = [i for i in xs if (i % step == 0 or i == len(labels) - 1)]
+                    tick_labels = [labels[i] for i in tick_idx]
                 baseline = getattr(state, "bankroll_amount", None)
                 if baseline is not None:
                     ax.axhline(y=baseline, color="#888888", linestyle="--", linewidth=1.0)
                 else:
                     ax.axhline(y=0.0, color="#888888", linestyle="--", linewidth=1.0)
-                ax.set_xticks(xs)
-                ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
+                ax.set_xticks(tick_idx)
+                ax.set_xticklabels(tick_labels, rotation=45, ha="right", fontsize=8)
+                try:
+                    fig = getattr(state, "daily_profit_fig", None)
+                    if fig is not None:
+                        fig.subplots_adjust(bottom=0.22)
+                except Exception:
+                    pass
                 ax.set_ylabel(
                     "Bankroll"
                     if getattr(state, "bankroll_amount", None) is not None
@@ -2429,6 +2592,15 @@ def _open_daily_stats_window(state: AppState) -> None:
             tv.tag_configure("roi_neg", foreground="#8b0000")
         except Exception:
             pass
+        try:
+            tv.bind(
+                "<Double-1>",
+                lambda _e: _show_daily_match_details(
+                    state, cast(str, tv.selection()[0]) if tv.selection() else ""
+                ),
+            )
+        except Exception:
+            pass
         state.daily_stats_tree = tv
 
         # Chart
@@ -2438,8 +2610,13 @@ def _open_daily_stats_window(state: AppState) -> None:
             from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
             from matplotlib.figure import Figure
 
-            fig = Figure(figsize=(7.5, 2.8), dpi=100)
+            fig = Figure(figsize=(7.5, 3.2), dpi=100)
             ax = fig.add_subplot(111)
+            # Leave space for rotated x-labels
+            try:
+                fig.subplots_adjust(bottom=0.22)
+            except Exception:
+                pass
             canvas = FigureCanvasTkAgg(fig, master=chart_frame)
             canvas_widget = canvas.get_tk_widget()
             canvas_widget.pack(fill="both", expand=True)
