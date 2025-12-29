@@ -2685,13 +2685,13 @@ def _open_daily_stats_window(state: AppState) -> None:
     if win is None:
         win = tk.Toplevel()
         win.title("Napi statisztika")
-        win.geometry("1100x720")
+        win.geometry("1400x800")
         try:
-            win.minsize(1000, 650)
+            win.minsize(1200, 650)
         except Exception:
             pass
         try:
-            win.minsize(850, 480)
+            win.minsize(950, 500)
         except Exception:
             pass
 
@@ -2701,55 +2701,48 @@ def _open_daily_stats_window(state: AppState) -> None:
             row=0, column=0, columnspan=2, sticky="we", padx=6, pady=(6, 4)
         )
 
+        # Filter row: all filters in one horizontal row
+        filter_frame = ttk.Frame(win)
+        filter_frame.grid(row=1, column=0, columnspan=2, sticky="ew", padx=6, pady=(0, 6))
+
         # Top-N selector for +EV tippek
-        top_n_frame = ttk.Frame(win)
-        top_n_frame.grid(row=1, column=0, columnspan=2, sticky="w", padx=6, pady=(0, 4))
-        ttk.Label(top_n_frame, text="Top +EV tippek / nap:").pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Label(filter_frame, text="Top +EV tippek / nap:").pack(side=tk.LEFT, padx=(0, 3))
         top_n_var = tk.StringVar(value="-")
         state.daily_top_n_var = top_n_var
         top_n_combo = ttk.Combobox(
-            top_n_frame,
+            filter_frame,
             textvariable=top_n_var,
             values=["-", "3", "5", "10"],
             state="readonly",
-            width=5,
+            width=3,
         )
-        top_n_combo.pack(side=tk.LEFT, padx=(0, 10))
-        ttk.Label(top_n_frame, text="- = összes +EV tipp").pack(side=tk.LEFT)
+        top_n_combo.pack(side=tk.LEFT, padx=(0, 15))
         top_n_combo.bind("<<ComboboxSelected>>", lambda _e: _refresh_daily_stats_window(state))
 
         # EV range selector
-        ev_frame = ttk.Frame(win)
-        ev_frame.grid(row=2, column=0, columnspan=2, sticky="w", padx=6, pady=(0, 4))
-        ttk.Label(ev_frame, text="EV tartom\u00e1ny:").pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Label(filter_frame, text="EV tartom\u00e1ny:").pack(side=tk.LEFT, padx=(0, 3))
         ev_var = tk.StringVar(value="-")
         state.daily_ev_range_var = ev_var
         ev_options = ["-"] + [lbl for (lbl, _lo, _hi) in EV_BINS]
         ev_combo = ttk.Combobox(
-            ev_frame, textvariable=ev_var, values=ev_options, state="readonly", width=16
+            filter_frame, textvariable=ev_var, values=ev_options, state="readonly", width=14
         )
-        ev_combo.pack(side=tk.LEFT, padx=(0, 10))
-        ttk.Label(ev_frame, text="- = \u00f6sszes EV").pack(side=tk.LEFT)
+        ev_combo.pack(side=tk.LEFT, padx=(0, 15))
         ev_combo.bind("<<ComboboxSelected>>", lambda _e: _refresh_daily_stats_window(state))
 
         # Odds range selector
-        odds_frame = ttk.Frame(win)
-        odds_frame.grid(row=3, column=0, columnspan=2, sticky="w", padx=6, pady=(0, 4))
-        ttk.Label(odds_frame, text="Odds tartom\u00e1ny:").pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Label(filter_frame, text="Odds tartom\u00e1ny:").pack(side=tk.LEFT, padx=(0, 3))
         odds_var = tk.StringVar(value="-")
         state.daily_odds_range_var = odds_var
         odds_options = ["-"] + [lbl for (lbl, _lo, _hi) in ODDS_BINS]
         odds_combo = ttk.Combobox(
-            odds_frame, textvariable=odds_var, values=odds_options, state="readonly", width=18
+            filter_frame, textvariable=odds_var, values=odds_options, state="readonly", width=16
         )
-        odds_combo.pack(side=tk.LEFT, padx=(0, 10))
-        ttk.Label(odds_frame, text="- = \u00f6sszes odds").pack(side=tk.LEFT)
+        odds_combo.pack(side=tk.LEFT, padx=(0, 15))
         odds_combo.bind("<<ComboboxSelected>>", lambda _e: _refresh_daily_stats_window(state))
 
         # Bookmaker selector (per daily stats view)
-        bm_frame = ttk.Frame(win)
-        bm_frame.grid(row=4, column=0, columnspan=2, sticky="w", padx=6, pady=(0, 6))
-        ttk.Label(bm_frame, text="Fogadóiroda:").pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Label(filter_frame, text="Fogadóiroda:").pack(side=tk.LEFT, padx=(0, 3))
         bm_var = tk.StringVar(value="-")
         state.daily_bm_var = bm_var
         bm_options = ["-"]
@@ -2761,13 +2754,15 @@ def _open_daily_stats_window(state: AppState) -> None:
         except Exception:
             pass
         bm_combo = ttk.Combobox(
-            bm_frame, textvariable=bm_var, values=bm_options, state="readonly", width=24
+            filter_frame, textvariable=bm_var, values=bm_options, state="readonly", width=20
         )
-        bm_combo.pack(side=tk.LEFT, padx=(0, 10))
-        ttk.Label(bm_frame, text="- = legjobb elérhető odds").pack(side=tk.LEFT)
+        bm_combo.pack(side=tk.LEFT, padx=(0, 0))
         bm_combo.bind("<<ComboboxSelected>>", lambda _e: _refresh_daily_stats_window(state))
 
-        # Table
+        # Table and Chart layout side-by-side
+        table_frame = ttk.Frame(win)
+        table_frame.grid(row=2, column=0, columnspan=2, sticky="nsew", padx=6, pady=(0, 6))
+
         cols = (
             "D\u00e1tum",
             "Meccs",
@@ -2780,7 +2775,7 @@ def _open_daily_stats_window(state: AppState) -> None:
             "ROI -EV",
             "Napi profit",
         )
-        tv = ttk.Treeview(win, columns=cols, show="headings", height=12)
+        tv = ttk.Treeview(table_frame, columns=cols, show="headings", height=12)
         widths = {
             "D\u00e1tum": 100,
             "Meccs": 70,
@@ -2796,10 +2791,10 @@ def _open_daily_stats_window(state: AppState) -> None:
         for c in cols:
             tv.heading(c, text=c)
             tv.column(c, width=widths.get(c, 100), anchor=("w" if c == "D\u00e1tum" else "center"))
-        vsb = ttk.Scrollbar(win, orient="vertical", command=tv.yview)
+        vsb = ttk.Scrollbar(table_frame, orient="vertical", command=tv.yview)
         tv.configure(yscrollcommand=vsb.set)
-        tv.grid(row=5, column=0, sticky="nsew", padx=(6, 0), pady=(0, 6))
-        vsb.grid(row=5, column=1, sticky="ns", pady=(0, 6))
+        tv.pack(side=tk.LEFT, fill="both", expand=True, padx=(0, 0))
+        vsb.pack(side=tk.LEFT, fill="y")
         try:
             tv.tag_configure("roi_pos", foreground="#006400")
             tv.tag_configure("roi_neg", foreground="#8b0000")
@@ -2816,18 +2811,18 @@ def _open_daily_stats_window(state: AppState) -> None:
             pass
         state.daily_stats_tree = tv
 
-        # Chart
+        # Chart frame - fully responsive
         chart_frame = ttk.Frame(win)
-        chart_frame.grid(row=6, column=0, columnspan=2, sticky="nsew", padx=6, pady=(0, 6))
+        chart_frame.grid(row=3, column=0, columnspan=2, sticky="nsew", padx=6, pady=(0, 6))
         try:
             from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
             from matplotlib.figure import Figure
 
-            fig = Figure(figsize=(7.5, 3.2), dpi=100)
+            fig = Figure(figsize=(10, 5), dpi=100)
             ax = fig.add_subplot(111)
             # Leave space for rotated x-labels
             try:
-                fig.subplots_adjust(bottom=0.3)
+                fig.subplots_adjust(bottom=0.25, left=0.08, right=0.95, top=0.95)
             except Exception:
                 pass
             canvas = FigureCanvasTkAgg(fig, master=chart_frame)
@@ -2846,7 +2841,7 @@ def _open_daily_stats_window(state: AppState) -> None:
 
         # Refresh button
         btn_bar = ttk.Frame(win)
-        btn_bar.grid(row=7, column=0, columnspan=2, sticky="we", padx=6, pady=(0, 8))
+        btn_bar.grid(row=4, column=0, columnspan=2, sticky="we", padx=6, pady=(0, 8))
         ttk.Button(
             btn_bar, text="Friss\u00edt\u00e9s", command=lambda: _refresh_daily_stats_window(state)
         ).pack(side=tk.LEFT)
@@ -2870,9 +2865,10 @@ def _open_daily_stats_window(state: AppState) -> None:
         except Exception:
             pass
 
-        # Let the table and chart rows take the available height; keep filter rows compact
-        win.grid_rowconfigure(4, weight=3)  # table
-        win.grid_rowconfigure(5, weight=2)  # chart
+        # Let row 2 (table) and row 3 (chart) take the available height
+        win.grid_rowconfigure(1, weight=0)  # filter row - compact
+        win.grid_rowconfigure(2, weight=3)  # table - larger
+        win.grid_rowconfigure(3, weight=1)  # chart - smaller
         win.grid_columnconfigure(0, weight=1)
         state.daily_stats_window = win
 
