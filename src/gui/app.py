@@ -1018,6 +1018,8 @@ class AppState:
     daily_stats_window: Any | None = None
     daily_stats_tree: ttk.Treeview | None = None
     daily_stats_info_var: tk.StringVar | None = None
+    daily_league_var: tk.StringVar | None = None
+    daily_league_label_to_id: Dict[str, str] | None = None
     daily_profit_fig: Any | None = None
     daily_profit_ax: Any | None = None
     daily_profit_canvas: Any | None = None
@@ -1573,6 +1575,80 @@ def _model_odds_range_stats(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     return rows_out
 
 
+def _get_available_leagues_for_daily(state: AppState) -> list[tuple[str, str]]:
+    """Get list of (league_id, league_name) tuples for leagues with matches, ordered by league_id.
+
+    Returns list of tuples (league_id_str, league_name) where league has at least one finished match.
+    """
+    conn = getattr(state, "conn", None)
+    model_key = getattr(state, "selected_model_key", None)
+    if conn is None or model_key is None:
+        return []
+
+    model_keys = _alias_keys_for(str(model_key))
+    placeholders = ",".join("?" for _ in model_keys) or "?"
+
+    try:
+        # Get distinct leagues that have finished matches with predictions for selected model
+        rows = conn.execute(
+            f"""
+            SELECT DISTINCT m.league_id, l.name, l.country
+            FROM matches m
+            JOIN predictions p ON p.match_id = m.match_id
+            LEFT JOIN leagues l ON l.league_id = m.league_id
+            WHERE m.real_result IN ('1','X','2') AND p.model_name IN ({placeholders})
+            ORDER BY m.league_id ASC
+            """,
+            tuple(model_keys),
+        ).fetchall()
+    except Exception:
+        return []
+
+    result = []
+    xg_map = _get_xg_league_map()
+
+    for league_id, league_name, country in rows:
+        try:
+            lid_int = _maybe_int(league_id)
+            if lid_int is None:
+                continue
+
+            # Prefer xG league name, fall back to DB
+            league_meta = xg_map.get(lid_int, {})
+            display_name = None
+            try:
+                cand = league_meta.get("league_name")
+                if isinstance(cand, str) and cand.strip():
+                    display_name = cand.strip()
+            except Exception:
+                pass
+
+            if not display_name and isinstance(league_name, str) and league_name.strip():
+                display_name = league_name.strip()
+
+            if not display_name:
+                display_name = f"Liga {lid_int}"
+
+            # Add country if available
+            country_str = None
+            try:
+                cjson = league_meta.get("country_name")
+                if isinstance(cjson, str) and cjson.strip():
+                    country_str = cjson.strip()
+            except Exception:
+                pass
+
+            if not country_str and isinstance(country, str) and country.strip():
+                country_str = country.strip()
+
+            label = f"{display_name} ({country_str})" if country_str else display_name
+            result.append((str(lid_int), label))
+        except Exception:
+            continue
+
+    return result
+
+
 def _compute_daily_model_stats(
     state: AppState,
 ) -> tuple[list[dict[str, Any]], list[tuple[str, float, float]], float, dict[str, float | None]]:
@@ -1594,6 +1670,18 @@ def _compute_daily_model_stats(
         search_q = state.search_var.get().strip().lower() if state.search_var is not None else ""
     except Exception:
         search_q = ""
+
+    # Get selected league filter
+    league_filter = "-"
+    try:
+        league_var = getattr(state, "daily_league_var", None)
+        if league_var is not None:
+            selected_label = league_var.get().strip() or "-"
+            # Resolve label to ID using the mapping stored in state
+            label_to_id_map = getattr(state, "daily_league_label_to_id", None) or {}
+            league_filter = label_to_id_map.get(selected_label, "-")
+    except Exception:
+        league_filter = "-"
 
     # Bookmaker selection: per-daily view dropdown overrides main selection; "-" means best available.
     bm_choice_name = "-"
@@ -1680,7 +1768,7 @@ def _compute_daily_model_stats(
         cur = conn.execute(
             f"""
             SELECT m.match_id, m.date, m.home_team, m.away_team, m.real_result,
-                   p.prob_home, p.prob_draw, p.prob_away, p.predicted_result
+                   p.prob_home, p.prob_draw, p.prob_away, p.predicted_result, m.league_id
             FROM matches m
             JOIN predictions p ON p.match_id = m.match_id
             WHERE m.real_result IN ('1','X','2') AND p.model_name IN ({placeholders})
@@ -1696,8 +1784,18 @@ def _compute_daily_model_stats(
     daily_details: Dict[str, list[dict[str, Any]]] = {}
     total_profit = 0.0
 
-    for mid, date_s, home, away, rr, ph, pd, pa, pref in rows:
+    for mid, date_s, home, away, rr, ph, pd, pa, pref, league_id in rows:
         try:
+            # Check league filter
+            if league_filter != "-":
+                try:
+                    selected_league_id = int(league_filter)
+                    match_league_id = _maybe_int(league_id)
+                    if match_league_id != selected_league_id:
+                        continue
+                except Exception:
+                    pass
+
             if search_q:
                 label = f"{home} - {away}".lower()
                 if search_q not in label:
@@ -2740,6 +2838,28 @@ def _open_daily_stats_window(state: AppState) -> None:
         )
         odds_combo.pack(side=tk.LEFT, padx=(0, 15))
         odds_combo.bind("<<ComboboxSelected>>", lambda _e: _refresh_daily_stats_window(state))
+
+        # Bookmaker selector (per daily stats view)
+        ttk.Label(filter_frame, text="Liga:").pack(side=tk.LEFT, padx=(0, 3))
+        league_var = tk.StringVar(value="-")
+        state.daily_league_var = league_var
+        league_options = ["-"]
+        label_to_league_id = {"-": "-"}  # Map display label to league ID
+        try:
+            available_leagues = _get_available_leagues_for_daily(state)
+            for lid, lbl in available_leagues:
+                display_label = lbl if lbl else f"Liga {lid}"
+                league_options.append(display_label)
+                label_to_league_id[display_label] = lid
+        except Exception:
+            pass
+        # Store the mapping in state for use in filter logic
+        state.daily_league_label_to_id = label_to_league_id
+        league_combo = ttk.Combobox(
+            filter_frame, textvariable=league_var, values=league_options, state="readonly", width=40
+        )
+        league_combo.pack(side=tk.LEFT, padx=(0, 15))
+        league_combo.bind("<<ComboboxSelected>>", lambda _e: _refresh_daily_stats_window(state))
 
         # Bookmaker selector (per daily stats view)
         ttk.Label(filter_frame, text="Fogadóiroda:").pack(side=tk.LEFT, padx=(0, 3))
