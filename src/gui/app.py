@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import os
+
+# Set matplotlib backend BEFORE any other imports
+os.environ["MPLBACKEND"] = "TkAgg"
+
 import json
 import math
-import os
 import sqlite3
 import time
 import tkinter as tk
@@ -2935,14 +2939,23 @@ def _open_daily_stats_window(state: AppState) -> None:
         chart_frame = ttk.Frame(win)
         chart_frame.grid(row=3, column=0, columnspan=2, sticky="nsew", padx=6, pady=(0, 6))
         try:
+            # Clean any half-loaded matplotlib modules to avoid circular import remnants
+            import sys
+
+            for mod_name in list(sys.modules.keys()):
+                if mod_name.startswith("matplotlib"):
+                    sys.modules.pop(mod_name, None)
+
+            # Backend already forced to TkAgg via MPLBACKEND env at process start
             from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
             from matplotlib.figure import Figure
 
-            fig = Figure(figsize=(10, 4), dpi=100)
+            # Taller and wider figure so the chart is easier to read
+            fig = Figure(figsize=(12, 6.5), dpi=100)
             ax = fig.add_subplot(111)
             # Leave space for rotated x-labels
             try:
-                fig.subplots_adjust(bottom=0.25, left=0.08, right=0.95, top=0.95)
+                fig.subplots_adjust(bottom=0.28, left=0.07, right=0.97, top=0.9)
             except Exception:
                 pass
             canvas = FigureCanvasTkAgg(fig, master=chart_frame)
@@ -2953,20 +2966,13 @@ def _open_daily_stats_window(state: AppState) -> None:
             state.daily_profit_fig = fig
             state.daily_profit_ax = ax
             state.daily_profit_canvas = canvas
-        except Exception:
+        except Exception as e:
             state.daily_profit_fig = None
             state.daily_profit_ax = None
             state.daily_profit_canvas = None
-            ttk.Label(chart_frame, text="A grafikonhoz nem \u00e9rhet\u0151 el a matplotlib.").pack(
-                anchor="w", padx=4, pady=4
-            )
-
-        # Refresh button
-        btn_bar = ttk.Frame(win)
-        btn_bar.grid(row=4, column=0, columnspan=2, sticky="we", padx=6, pady=(0, 8))
-        ttk.Button(
-            btn_bar, text="Friss\u00edt\u00e9s", command=lambda: _refresh_daily_stats_window(state)
-        ).pack(side=tk.LEFT)
+            error_msg = f"A grafikonhoz nem érhető el a matplotlib: {str(e)}"
+            print(f"[GUI] {error_msg}")
+            ttk.Label(chart_frame, text=error_msg).pack(anchor="w", padx=4, pady=4)
 
         def _on_close() -> None:
             try:
@@ -2989,8 +2995,8 @@ def _open_daily_stats_window(state: AppState) -> None:
 
         # Let row 2 (table) and row 3 (chart) take the available height
         win.grid_rowconfigure(1, weight=0)  # filter row - compact
-        win.grid_rowconfigure(2, weight=3)  # table - larger
-        win.grid_rowconfigure(3, weight=1)  # chart - smaller
+        win.grid_rowconfigure(2, weight=1)  # table
+        win.grid_rowconfigure(3, weight=3)  # chart larger
         win.grid_columnconfigure(0, weight=1)
         state.daily_stats_window = win
 
@@ -4845,6 +4851,41 @@ def run_app() -> None:
     def _on_toggle_played() -> None:
         try:
             state.show_played = not bool(getattr(state, "show_played", False))
+
+            # Reset all filters except model filter
+            try:
+                if state.bm_combo_var is not None:
+                    state.bm_combo_var.set("(Mind)")
+            except Exception:
+                pass
+            try:
+                if state.upcoming_odds_var is not None:
+                    state.upcoming_odds_var.set("-")
+            except Exception:
+                pass
+            try:
+                if state.upcoming_ev_var is not None:
+                    state.upcoming_ev_var.set("-")
+            except Exception:
+                pass
+            try:
+                if state.search_var is not None:
+                    state.search_var.set("")
+            except Exception:
+                pass
+            try:
+                if state.winners_only_var is not None:
+                    state.winners_only_var.set(False)
+                    state.winners_only = False
+            except Exception:
+                pass
+            try:
+                if state.exclude_extremes_var is not None:
+                    state.exclude_extremes_var.set(False)
+                    state.exclude_extremes = False
+            except Exception:
+                pass
+
             _apply_displaycolumns()
             _update_odds_headers()
             _update_filter_enablement()
