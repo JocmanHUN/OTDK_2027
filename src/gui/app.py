@@ -2938,7 +2938,7 @@ def _open_daily_stats_window(state: AppState) -> None:
             from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
             from matplotlib.figure import Figure
 
-            fig = Figure(figsize=(10, 5), dpi=100)
+            fig = Figure(figsize=(10, 4), dpi=100)
             ax = fig.add_subplot(111)
             # Leave space for rotated x-labels
             try:
@@ -2948,6 +2948,8 @@ def _open_daily_stats_window(state: AppState) -> None:
             canvas = FigureCanvasTkAgg(fig, master=chart_frame)
             canvas_widget = canvas.get_tk_widget()
             canvas_widget.pack(fill="both", expand=True)
+            # Force the frame to properly expand
+            chart_frame.pack_propagate(False)
             state.daily_profit_fig = fig
             state.daily_profit_ax = ax
             state.daily_profit_canvas = canvas
