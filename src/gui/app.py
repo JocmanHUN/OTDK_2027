@@ -1043,6 +1043,15 @@ class AppState:
     league_side_btn: Any | None = None
     league_sort_col: str | None = None
     league_sort_reverse: bool = False
+    # Additional daily stats attributes
+    daily_start_date_var: tk.StringVar | None = None
+    daily_min_odds_var: tk.StringVar | None = None
+    daily_max_odds_var: tk.StringVar | None = None
+    daily_min_odds_entry: ttk.Entry | None = None
+    daily_max_odds_entry: ttk.Entry | None = None
+    # Bin details for drill-down
+    odds_bin_matches: Dict[str, list[dict[str, Any]]] | None = None
+    ev_bin_matches: Dict[str, list[dict[str, Any]]] | None = None
 
 
 def _update_model_stats_panel(
@@ -1082,6 +1091,10 @@ def _update_model_stats_panel(
         ev_pos_total = {"count": 0, "wins": 0, "profit": 0.0}
         ev_neg_total = {"count": 0, "wins": 0, "profit": 0.0}
         exclude_ext = bool(getattr(state, "exclude_extremes", False))
+
+        # Store detailed match info for drill-down
+        odds_bin_details: Dict[str, list[dict[str, Any]]] = {label: [] for label, _, _ in ODDS_BINS}
+        ev_bin_details: Dict[str, list[dict[str, Any]]] = {label: [] for label, _, _ in EV_BINS}
 
         for mid, _dt_s, _home, _away in filtered_matches:
             try:
@@ -1167,7 +1180,8 @@ def _update_model_stats_panel(
                         if ev > 0 and rr == sel:
                             pos_ev_win += 1
                     try:
-                        b = bin_agg.get(_odds_bin_label(float(odd_val)))
+                        odds_bin_label = _odds_bin_label(float(odd_val))
+                        b = bin_agg.get(odds_bin_label)
                         if b is not None:
                             b["count"] = int(b.get("count", 0) or 0) + 1
                             if rr == sel:
@@ -1177,6 +1191,46 @@ def _update_model_stats_panel(
                                 )
                             else:
                                 b["profit"] = float(b.get("profit", 0.0) or 0.0) - 1.0
+
+                            # Store match details for odds bin
+                            try:
+                                match_details = odds_bin_details.get(odds_bin_label)
+                                if match_details is not None:
+                                    # Convert date to Budapest time for consistency
+                                    match_date_str = _dt_s
+                                    try:
+                                        from datetime import datetime as dt_parse
+                                        from datetime import timezone
+
+                                        dt_obj = dt_parse.fromisoformat(str(_dt_s))
+                                        if dt_obj.tzinfo is None:
+                                            dt_obj = dt_obj.replace(tzinfo=timezone.utc)
+                                        try:
+                                            from zoneinfo import ZoneInfo
+
+                                            dt_obj = dt_obj.astimezone(ZoneInfo("Europe/Budapest"))
+                                        except Exception:
+                                            pass
+                                        match_date_str = dt_obj.strftime("%Y-%m-%d %H:%M")
+                                    except Exception:
+                                        match_date_str = str(_dt_s)[:10]
+
+                                    match_details.append(
+                                        {
+                                            "match_id": mid_i,
+                                            "date": match_date_str,
+                                            "home": _home,
+                                            "away": _away,
+                                            "result": rr,
+                                            "predicted": sel,
+                                            "won": rr == sel,
+                                            "odds": float(odd_val),
+                                            "ev": ev if ev is not None else 0.0,
+                                        }
+                                    )
+                            except Exception:
+                                pass
+
                         if ev is not None:
                             # EV bins
                             ev_label = _ev_bin_label(ev)
@@ -1188,6 +1242,47 @@ def _update_model_stats_panel(
                                 eb["profit"] = float(eb.get("profit", 0.0) or 0.0) + (
                                     (float(odd_val) - 1.0) if rr == sel else -1.0
                                 )
+
+                                # Store match details for EV bin
+                                try:
+                                    ev_match_details = ev_bin_details.get(ev_label)
+                                    if ev_match_details is not None:
+                                        # Convert date to Budapest time for consistency
+                                        match_date_str = _dt_s
+                                        try:
+                                            from datetime import datetime as dt_parse
+                                            from datetime import timezone
+
+                                            dt_obj = dt_parse.fromisoformat(str(_dt_s))
+                                            if dt_obj.tzinfo is None:
+                                                dt_obj = dt_obj.replace(tzinfo=timezone.utc)
+                                            try:
+                                                from zoneinfo import ZoneInfo
+
+                                                dt_obj = dt_obj.astimezone(
+                                                    ZoneInfo("Europe/Budapest")
+                                                )
+                                            except Exception:
+                                                pass
+                                            match_date_str = dt_obj.strftime("%Y-%m-%d %H:%M")
+                                        except Exception:
+                                            match_date_str = str(_dt_s)[:10]
+
+                                        ev_match_details.append(
+                                            {
+                                                "match_id": mid_i,
+                                                "date": match_date_str,
+                                                "home": _home,
+                                                "away": _away,
+                                                "result": rr,
+                                                "predicted": sel,
+                                                "won": rr == sel,
+                                                "odds": float(odd_val),
+                                                "ev": ev,
+                                            }
+                                        )
+                                except Exception:
+                                    pass
                             if ev >= 0:
                                 ev_pos_total["count"] += 1
                                 if rr == sel:
@@ -1229,6 +1324,9 @@ def _update_model_stats_panel(
             if v is not None:
                 v.set(str(pos_ev_win))
 
+        # Store detailed match data for odds bins (for drill-down)
+        state.odds_bin_matches = odds_bin_details
+
         # Update odds-bin table
         bins_tree = getattr(state, "stats_bins_tree", None)
         if bins_tree is not None:
@@ -1245,6 +1343,7 @@ def _update_model_stats_panel(
                     bins_tree.insert(
                         "",
                         "end",
+                        iid=label,
                         values=[
                             label,
                             f"{hit_b:.2f}%" if hit_b is not None else "-",
@@ -1293,6 +1392,9 @@ def _update_model_stats_panel(
             except Exception:
                 pass
 
+        # Store detailed match data for EV bins (for drill-down)
+        state.ev_bin_matches = ev_bin_details
+
         # Update detailed EV-bin table
         ev_tree = getattr(state, "stats_ev_tree", None)
         if ev_tree is not None:
@@ -1309,6 +1411,7 @@ def _update_model_stats_panel(
                     ev_tree.insert(
                         "",
                         "end",
+                        iid=label,
                         values=[
                             label,
                             f"{hit_b:.2f}%" if hit_b is not None else "-",
@@ -1371,6 +1474,158 @@ def _ev_bin_label(ev: float) -> str:
         if ev >= low and (idx == len(EV_BINS) - 1 or ev < high):
             return label
     return EV_BINS[-1][0]
+
+
+def _show_bin_details(bin_label: str, matches: list[dict[str, Any]], bin_type: str) -> None:
+    """Show detailed match list for a specific bin in a new window."""
+    try:
+        # Calculate detailed statistics
+        total_profit = 0.0
+        count = len(matches)
+        wins = 0
+        losses = 0
+
+        for match in matches:
+            try:
+                won = match.get("won", False)
+                odds_val = match.get("odds", 0.0)
+                if won:
+                    total_profit += odds_val - 1.0
+                    wins += 1
+                else:
+                    total_profit -= 1.0
+                    losses += 1
+            except Exception:
+                continue
+
+        roi = (total_profit / count * 100.0) if count > 0 else 0.0
+        hit_rate = (wins / count * 100.0) if count > 0 else 0.0
+
+        win = tk.Toplevel()
+        win.title(f"{bin_type}: {bin_label}")
+        win.geometry("900x650")
+
+        # Info frame with detailed stats
+        info_frame = ttk.Frame(win)
+        info_frame.pack(padx=10, pady=5, fill=tk.X)
+
+        # Main title
+        ttk.Label(info_frame, text=f"{bin_type} - {bin_label}", font=("", 11, "bold")).grid(
+            row=0, column=0, columnspan=4, pady=(0, 5)
+        )
+
+        # Statistics grid
+        stats_data = [
+            ("Összes meccs:", f"{count}"),
+            ("Nyertes:", f"{wins} ({hit_rate:.1f}%)"),
+            ("Vesztes:", f"{losses} ({(100-hit_rate):.1f}%)"),
+            ("Összes profit:", f"{total_profit:+.2f} egység"),
+            ("ROI:", f"{roi:+.2f}%"),
+        ]
+
+        for i, (label, value) in enumerate(stats_data):
+            ttk.Label(info_frame, text=label, font=("", 9)).grid(
+                row=(i // 2) + 1, column=(i % 2) * 2, sticky="e", padx=(5, 2), pady=2
+            )
+            value_color = (
+                "#006400"
+                if (("+" in value and "%" in value) or ("profit" in label.lower() and "+" in value))
+                else ("#8b0000" if "-" in value else "black")
+            )
+            value_label = ttk.Label(
+                info_frame, text=value, font=("", 9, "bold"), foreground=value_color
+            )
+            value_label.grid(
+                row=(i // 2) + 1, column=(i % 2) * 2 + 1, sticky="w", padx=(2, 15), pady=2
+            )
+
+        ttk.Separator(win, orient="horizontal").pack(fill=tk.X, padx=10, pady=5)
+
+        # Create treeview for matches
+        cols = ("Dátum", "Meccs", "Eredmény", "Tipp", "Nyert?", "Odds", "EV", "Profit")
+        tree_frame = ttk.Frame(win)
+        tree_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+
+        tree = ttk.Treeview(tree_frame, columns=cols, show="headings")
+
+        for col in cols:
+            tree.heading(col, text=col)
+
+        tree.column("Dátum", width=130, anchor="center")
+        tree.column("Meccs", width=220, anchor="w")
+        tree.column("Eredmény", width=60, anchor="center")
+        tree.column("Tipp", width=50, anchor="center")
+        tree.column("Nyert?", width=60, anchor="center")
+        tree.column("Odds", width=70, anchor="center")
+        tree.column("EV", width=80, anchor="center")
+        tree.column("Profit", width=80, anchor="center")
+
+        # Add scrollbar
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+
+        # Tag configuration
+        try:
+            tree.tag_configure("win", background="#e6ffe6")
+            tree.tag_configure("lose", background="#ffeaea")
+        except Exception:
+            pass
+
+        # Sort matches by date (ascending)
+        sorted_matches = sorted(matches, key=lambda m: m.get("date", ""))
+
+        # Insert matches
+        for match in sorted_matches:
+            try:
+                date_str = str(match.get("date", ""))
+                # If date has time, show it; otherwise just date
+                if len(date_str) > 10:
+                    # Already has time from conversion
+                    pass
+                else:
+                    # Old format, just date
+                    date_str = date_str[:10]
+                home = match.get("home", "")
+                away = match.get("away", "")
+                match_label = f"{home} - {away}"
+                result = match.get("result", "-")
+                predicted = match.get("predicted", "-")
+                won = match.get("won", False)
+                odds_val = match.get("odds", 0.0)
+                ev_val = match.get("ev", 0.0)
+
+                # Calculate profit for this match
+                profit = (odds_val - 1.0) if won else -1.0
+
+                won_str = "✓" if won else "✗"
+                tag = "win" if won else "lose"
+
+                tree.insert(
+                    "",
+                    "end",
+                    values=[
+                        date_str,
+                        match_label,
+                        result,
+                        predicted,
+                        won_str,
+                        f"{odds_val:.2f}",
+                        f"{ev_val * 100:.1f}%",
+                        f"{profit:+.2f}",
+                    ],
+                    tags=(tag,),
+                )
+            except Exception:
+                continue
+
+        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Close button
+        ttk.Button(win, text="Bezárás", command=win.destroy).pack(pady=5)
+
+    except Exception:
+        pass
 
 
 def _format_bin_summary(
@@ -1702,8 +1957,8 @@ def _compute_daily_model_stats(
             use_bm = rev.get(bm_choice_name)
         except Exception:
             use_bm = None
-    elif getattr(state, "selected_bookmaker_id", None) is not None:
-        use_bm = state.selected_bookmaker_id
+    # Note: If daily_bm_var is "-", we use best odds (use_bm stays None)
+    # We do NOT fall back to state.selected_bookmaker_id from the main window
     # Store resolved bookmaker for later display
     setattr(state, "daily_selected_bookmaker_id", use_bm)
     exclude_ext = bool(getattr(state, "exclude_extremes", False))
@@ -1730,27 +1985,77 @@ def _compute_daily_model_stats(
     odds_label = odds_range_var.get().strip() if odds_range_var is not None else "-"
     odds_range_map = {label: (low, high) for (label, low, high) in ODDS_BINS}
     odds_bounds: tuple[float | None, float | None] | None = None
-    if odds_label in odds_range_map:
+
+    # Check if manual odds range is specified
+    min_odds_var = getattr(state, "daily_min_odds_var", None)
+    max_odds_var = getattr(state, "daily_max_odds_var", None)
+    min_odds_str = min_odds_var.get().strip() if min_odds_var is not None else ""
+    max_odds_str = max_odds_var.get().strip() if max_odds_var is not None else ""
+
+    # Manual odds range takes precedence over combo selection
+    if min_odds_str or max_odds_str:
+        try:
+            min_val = float(min_odds_str) if min_odds_str else None
+            max_val = float(max_odds_str) if max_odds_str else None
+            odds_bounds = (min_val, max_val)
+        except ValueError:
+            # Invalid input, ignore manual range
+            pass
+    elif odds_label in odds_range_map:
         odds_bounds = odds_range_map[odds_label]
 
     # Preload odds per match (selected bookmaker or best available)
     odds_by_match: Dict[int, Tuple[float, float, float, int | None]] = {}
     if use_bm is None:
+        # Best odds: for each match, get the highest odds for each outcome (H/D/A)
         try:
+            best_odds_temp: Dict[int, Dict[str, Tuple[float, int]]] = {}
             for mid, bid, oh, od, oa in conn.execute(
-                """
-                SELECT o.match_id, o.bookmaker_id, o.odds_home, o.odds_draw, o.odds_away
-                FROM odds o
-                JOIN (
-                    SELECT match_id, MAX(odds_home) AS mh FROM odds GROUP BY match_id
-                ) m ON o.match_id = m.match_id AND o.odds_home = m.mh
-                """
+                "SELECT match_id, bookmaker_id, odds_home, odds_draw, odds_away FROM odds"
             ).fetchall():
                 try:
+                    mid_int = int(mid)
                     bid_int = int(bid) if bid is not None else None
-                    odds_by_match[int(mid)] = (float(oh), float(od), float(oa), bid_int)
+                    if mid_int not in best_odds_temp:
+                        best_odds_temp[mid_int] = {}
+
+                    # Track best odds for each outcome
+                    if (
+                        "1" not in best_odds_temp[mid_int]
+                        or float(oh) > best_odds_temp[mid_int]["1"][0]
+                    ):
+                        best_odds_temp[mid_int]["1"] = (
+                            float(oh),
+                            bid_int if bid_int is not None else 0,
+                        )
+                    if (
+                        "X" not in best_odds_temp[mid_int]
+                        or float(od) > best_odds_temp[mid_int]["X"][0]
+                    ):
+                        best_odds_temp[mid_int]["X"] = (
+                            float(od),
+                            bid_int if bid_int is not None else 0,
+                        )
+                    if (
+                        "2" not in best_odds_temp[mid_int]
+                        or float(oa) > best_odds_temp[mid_int]["2"][0]
+                    ):
+                        best_odds_temp[mid_int]["2"] = (
+                            float(oa),
+                            bid_int if bid_int is not None else 0,
+                        )
                 except Exception:
                     continue
+
+            # Now create the final odds_by_match with best odds for H/D/A
+            # We'll use the bookmaker that has the best HOME odds as the "primary" bid for this match
+            # (This is a simplification - in reality each outcome might have different best bookmaker)
+            for mid_int, outcomes in best_odds_temp.items():
+                oh_val, bid_h = outcomes.get("1", (0.0, None))
+                od_val, bid_d = outcomes.get("X", (0.0, None))
+                oa_val, bid_a = outcomes.get("2", (0.0, None))
+                # Use the bookmaker from home odds as representative (could be any)
+                odds_by_match[mid_int] = (oh_val, od_val, oa_val, bid_h)
         except Exception:
             odds_by_match = {}
     else:
@@ -1788,8 +2093,35 @@ def _compute_daily_model_stats(
     daily_details: Dict[str, list[dict[str, Any]]] = {}
     total_profit = 0.0
 
+    # Get start date filter
+    start_date_filter = None
+    try:
+        start_date_var = getattr(state, "daily_start_date_var", None)
+        if start_date_var is not None:
+            start_date_str = start_date_var.get().strip()
+            if start_date_str and start_date_str != "YYYY-MM-DD":
+                try:
+                    # Parse as YYYY-MM-DD
+                    from datetime import datetime as dt_parse
+
+                    start_date_filter = dt_parse.strptime(start_date_str, "%Y-%m-%d").date()
+                except ValueError:
+                    # Invalid date format, ignore filter
+                    start_date_filter = None
+    except Exception:
+        start_date_filter = None
+
     for mid, date_s, home, away, rr, ph, pd, pa, pref, league_id in rows:
         try:
+            # Check start date filter
+            if start_date_filter is not None:
+                try:
+                    match_date = datetime.fromisoformat(str(date_s)).date()
+                    if match_date < start_date_filter:
+                        continue
+                except Exception:
+                    pass
+
             # Check league filter
             if league_filter != "-":
                 try:
@@ -2570,7 +2902,6 @@ def _refresh_daily_stats_window(state: AppState) -> None:
     ax = getattr(state, "daily_profit_ax", None)
     canvas = getattr(state, "daily_profit_canvas", None)
 
-    # If not in played view, clear and hint
     if not getattr(state, "show_played", False):
         try:
             for i in tv.get_children():
@@ -2641,9 +2972,11 @@ def _refresh_daily_stats_window(state: AppState) -> None:
         dd_val = risk.get("max_drawdown") if isinstance(risk, dict) else None
         std_str = f"{std_val:.2f}" if std_val is not None else "-"
         dd_str = f"{dd_val:.2f}" if dd_val is not None else "-"
+        # Calculate overall ROI
+        overall_roi = (total_profit / total_matches * 100.0) if total_matches > 0 else 0.0
         if info_var is not None:
             info_var.set(
-                f"Modell: {model_label} | Fogad\u00f3iroda: {bm_label} | Meccsek: {total_matches} | \u00d6sszprofit: {total_profit:+.2f} | Sz\u00f3r\u00e1s: {std_str} egys\u00e9g | Max DD: {dd_str} egys\u00e9g"
+                f"Modell: {model_label} | Fogad\u00f3iroda: {bm_label} | Meccsek: {total_matches} | \u00d6sszprofit: {total_profit:+.2f} | ROI: {overall_roi:+.2f}% | Sz\u00f3r\u00e1s: {std_str} | Max DD: {dd_str}"
             )
     except Exception:
         if info_var is not None:
@@ -2807,6 +3140,37 @@ def _open_daily_stats_window(state: AppState) -> None:
         filter_frame = ttk.Frame(win)
         filter_frame.grid(row=1, column=0, columnspan=2, sticky="ew", padx=6, pady=(0, 6))
 
+        # Start date filter
+        ttk.Label(filter_frame, text="Kezdő dátum:").pack(side=tk.LEFT, padx=(0, 3))
+        start_date_var = tk.StringVar(value="")
+        state.daily_start_date_var = start_date_var
+        start_date_entry = ttk.Entry(filter_frame, textvariable=start_date_var, width=12)
+        start_date_entry.pack(side=tk.LEFT, padx=(0, 15))
+        start_date_entry.bind("<FocusOut>", lambda _e: _refresh_daily_stats_window(state))
+        start_date_entry.bind("<Return>", lambda _e: _refresh_daily_stats_window(state))
+        # Add placeholder hint
+        try:
+            start_date_entry.insert(0, "YYYY-MM-DD")
+            start_date_entry.config(foreground="gray")
+
+            def on_start_date_focus_in(e: Any) -> None:
+                if start_date_var.get() == "YYYY-MM-DD":
+                    start_date_entry.delete(0, tk.END)
+                    start_date_entry.config(foreground="black")
+
+            def on_start_date_focus_out(e: Any) -> None:
+                if not start_date_var.get():
+                    start_date_entry.insert(0, "YYYY-MM-DD")
+                    start_date_entry.config(foreground="gray")
+                else:
+                    _refresh_daily_stats_window(state)
+
+            start_date_entry.bind("<FocusIn>", on_start_date_focus_in)
+            start_date_entry.unbind("<FocusOut>")
+            start_date_entry.bind("<FocusOut>", on_start_date_focus_out)
+        except Exception:
+            pass
+
         # Top-N selector for +EV tippek
         ttk.Label(filter_frame, text="Top +EV tippek / nap:").pack(side=tk.LEFT, padx=(0, 3))
         top_n_var = tk.StringVar(value="-")
@@ -2840,8 +3204,48 @@ def _open_daily_stats_window(state: AppState) -> None:
         odds_combo = ttk.Combobox(
             filter_frame, textvariable=odds_var, values=odds_options, state="readonly", width=16
         )
-        odds_combo.pack(side=tk.LEFT, padx=(0, 15))
-        odds_combo.bind("<<ComboboxSelected>>", lambda _e: _refresh_daily_stats_window(state))
+        odds_combo.pack(side=tk.LEFT, padx=(0, 3))
+
+        # Manual odds range inputs
+        ttk.Label(filter_frame, text="vagy Min:").pack(side=tk.LEFT, padx=(0, 2))
+        min_odds_var = tk.StringVar(value="")
+        state.daily_min_odds_var = min_odds_var
+        min_odds_entry = ttk.Entry(filter_frame, textvariable=min_odds_var, width=6)
+        min_odds_entry.pack(side=tk.LEFT, padx=(0, 3))
+        min_odds_entry.bind("<FocusOut>", lambda _e: _refresh_daily_stats_window(state))
+        min_odds_entry.bind("<Return>", lambda _e: _refresh_daily_stats_window(state))
+
+        ttk.Label(filter_frame, text="Max:").pack(side=tk.LEFT, padx=(0, 2))
+        max_odds_var = tk.StringVar(value="")
+        state.daily_max_odds_var = max_odds_var
+        max_odds_entry = ttk.Entry(filter_frame, textvariable=max_odds_var, width=6)
+        max_odds_entry.pack(side=tk.LEFT, padx=(0, 15))
+        max_odds_entry.bind("<FocusOut>", lambda _e: _refresh_daily_stats_window(state))
+        max_odds_entry.bind("<Return>", lambda _e: _refresh_daily_stats_window(state))
+
+        # Store entry widgets for enabling/disabling
+        state.daily_min_odds_entry = min_odds_entry
+        state.daily_max_odds_entry = max_odds_entry
+
+        # Handler to toggle manual odds entries based on combo selection
+        def _on_odds_combo_change(_e: Any) -> None:
+            try:
+                selected = odds_var.get().strip()
+                # If a predefined range is selected (not "-"), disable manual entries
+                if selected != "-":
+                    min_odds_entry.configure(state="disabled")
+                    max_odds_entry.configure(state="disabled")
+                    # Clear manual values when combo is used
+                    min_odds_var.set("")
+                    max_odds_var.set("")
+                else:
+                    min_odds_entry.configure(state="normal")
+                    max_odds_entry.configure(state="normal")
+            except Exception:
+                pass
+            _refresh_daily_stats_window(state)
+
+        odds_combo.bind("<<ComboboxSelected>>", _on_odds_combo_change)
 
         # Bookmaker selector (per daily stats view)
         ttk.Label(filter_frame, text="Liga:").pack(side=tk.LEFT, padx=(0, 3))
@@ -4551,6 +4955,21 @@ def run_app() -> None:
             pass
         bins_tree.grid(row=len(labels), column=0, columnspan=2, sticky="nsew", padx=6, pady=(6, 4))
         state.stats_bins_tree = bins_tree
+
+        # Add double-click event handler for odds bins
+        def _on_odds_bin_click(event: Any) -> None:
+            try:
+                selection = bins_tree.selection()
+                if selection:
+                    item_id = selection[0]
+                    bin_label = item_id  # We used the label as iid
+                    matches = getattr(state, "odds_bin_matches", {}).get(bin_label, [])
+                    if matches:
+                        _show_bin_details(bin_label, matches, "Odds sáv")
+            except Exception:
+                pass
+
+        bins_tree.bind("<Double-Button-1>", _on_odds_bin_click)
         # EV totals table (EV > 0 / EV < 0)
         ev_totals_cols = ("EV sáv", "Találati arány", "Minta", "ROI")
         ev_totals_tree = ttk.Treeview(
@@ -4595,6 +5014,22 @@ def run_app() -> None:
         ev_tree.grid(row=0, column=0, sticky="nsew")
         ev_scroll.grid(row=0, column=1, sticky="ns")
         state.stats_ev_tree = ev_tree
+
+        # Add double-click event handler for EV bins
+        def _on_ev_bin_click(event: Any) -> None:
+            try:
+                selection = ev_tree.selection()
+                if selection:
+                    item_id = selection[0]
+                    bin_label = item_id  # We used the label as iid
+                    matches = getattr(state, "ev_bin_matches", {}).get(bin_label, [])
+                    if matches:
+                        _show_bin_details(bin_label, matches, "EV sáv")
+            except Exception:
+                pass
+
+        ev_tree.bind("<Double-Button-1>", _on_ev_bin_click)
+
         # Checkbox to drop extreme values from stats
         try:
             exclude_var = tk.BooleanVar(value=False)
@@ -4856,6 +5291,8 @@ def run_app() -> None:
             try:
                 if state.bm_combo_var is not None:
                     state.bm_combo_var.set("(Mind)")
+                # Also reset the internal selected bookmaker ID
+                state.selected_bookmaker_id = None
             except Exception:
                 pass
             try:
