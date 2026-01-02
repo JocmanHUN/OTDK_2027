@@ -1049,6 +1049,10 @@ class AppState:
     daily_max_odds_var: tk.StringVar | None = None
     daily_min_odds_entry: ttk.Entry | None = None
     daily_max_odds_entry: ttk.Entry | None = None
+    daily_show_parlay_chart: bool = False
+    daily_top_n_type_var: tk.StringVar | None = None
+    daily_show_napi_var: tk.BooleanVar | None = None
+    daily_show_kotes_var: tk.BooleanVar | None = None
     # Bin details for drill-down
     odds_bin_matches: Dict[str, list[dict[str, Any]]] | None = None
     ev_bin_matches: Dict[str, list[dict[str, Any]]] | None = None
@@ -1910,20 +1914,36 @@ def _get_available_leagues_for_daily(state: AppState) -> list[tuple[str, str]]:
 
 def _compute_daily_model_stats(
     state: AppState,
-) -> tuple[list[dict[str, Any]], list[tuple[str, float, float]], float, dict[str, float | None]]:
+) -> tuple[
+    list[dict[str, Any]],
+    list[tuple[str, float, float]],
+    list[tuple[str, float, float]],
+    float,
+    dict[str, float | None],
+    dict[str, float | None],
+]:
     """Aggregate finished matches per day for the selected model.
 
-    Returns (rows, cumulative_points, total_profit, risk):
-    - rows: [{date, count, hit_rate, pos_count, neg_count, roi_pos, roi_neg, hit_pos, hit_neg, profit}]
-    - cumulative_points: list of (date, bankroll_or_profit, raw_profit) for plotting
+    Returns (rows, cumulative, cumulative_parlay, total_profit, risk, risk_parlay):
+    - rows: [{date, count, hit_rate, pos_count, neg_count, roi_pos, roi_neg, hit_pos, hit_neg, profit, profit_parlay}]
+    - cumulative: list of (date, bankroll_or_profit, raw_profit) for plotting (normal mode)
+    - cumulative_parlay: list of (date, bankroll_or_profit, raw_profit) for plotting (parlay mode)
     - total_profit: overall profit across all counted matches
-    - risk: {"std": daily_profit_std, "max_drawdown": max_dd}
+    - risk: {"std": daily_profit_std, "max_drawdown": max_dd} for normal mode
+    - risk_parlay: {"std": daily_profit_std, "max_drawdown": max_dd} for parlay mode
     """
 
     conn = getattr(state, "conn", None)
     model_key = getattr(state, "selected_model_key", None)
     if conn is None or model_key is None:
-        return [], [], 0.0, {"std": None, "max_drawdown": None}
+        return (
+            [],
+            [],
+            [],
+            0.0,
+            {"std": None, "max_drawdown": None},
+            {"std": None, "max_drawdown": None},
+        )
 
     try:
         search_q = state.search_var.get().strip().lower() if state.search_var is not None else ""
@@ -1962,6 +1982,8 @@ def _compute_daily_model_stats(
     # Store resolved bookmaker for later display
     setattr(state, "daily_selected_bookmaker_id", use_bm)
     exclude_ext = bool(getattr(state, "exclude_extremes", False))
+
+    # Top-N filter configuration
     top_n_var = getattr(state, "daily_top_n_var", None)
     raw_val = top_n_var.get().strip() if top_n_var is not None else "0"
     try:
@@ -1971,6 +1993,10 @@ def _compute_daily_model_stats(
             top_n = max(0, int(raw_val))
     except Exception:
         top_n = 0
+
+    # Top-N type configuration
+    top_n_type_var = getattr(state, "daily_top_n_type_var", None)
+    top_n_type = top_n_type_var.get().strip() if top_n_type_var is not None else "Legjobb +EV"
 
     # Selected EV range filter (label from EV_BINS or "-")
     ev_range_var = getattr(state, "daily_ev_range_var", None)
@@ -2218,19 +2244,64 @@ def _compute_daily_model_stats(
 
     rows_out: list[dict[str, Any]] = []
     cumulative: list[tuple[str, float, float]] = []
+    cumulative_parlay: list[tuple[str, float, float]] = []
     running = 0.0
+    running_parlay = 0.0
     peak = 0.0
+    peak_parlay = 0.0
     max_dd = 0.0  # negative or zero
+    max_dd_parlay = 0.0
     daily_profit_list: list[float] = []
+    daily_profit_list_parlay: list[float] = []
     bankroll = getattr(state, "bankroll_amount", None)
+
     for day in sorted(daily_matches.keys()):
         matches = daily_matches[day]
-        # If top_n > 0, pick the best positive EV tips up to N
+        # Apply top-N filtering based on selected type
+        selected = []
+
         if top_n > 0:
-            positives = [m for m in matches if m.get("ev", 0.0) >= 0]
-            positives.sort(key=lambda x: float(x.get("ev", 0.0)), reverse=True)
-            selected = positives[:top_n]
+            if top_n_type == "Legjobb +EV":
+                # Best positive EV (highest positive values)
+                positives = [m for m in matches if m.get("ev", 0.0) >= 0]
+                positives.sort(key=lambda x: float(x.get("ev", 0.0)), reverse=True)
+                selected = positives[:top_n]
+
+            elif top_n_type == "Legrosszabb +EV":
+                # Worst positive EV (lowest positive values)
+                positives = [m for m in matches if m.get("ev", 0.0) >= 0]
+                positives.sort(key=lambda x: float(x.get("ev", 0.0)))
+                selected = positives[:top_n]
+
+            elif top_n_type == "Legjobb -EV":
+                # Best negative EV (least negative, closest to 0)
+                negatives = [m for m in matches if m.get("ev", 0.0) < 0]
+                negatives.sort(key=lambda x: float(x.get("ev", 0.0)), reverse=True)
+                selected = negatives[:top_n]
+
+            elif top_n_type == "Legrosszabb -EV":
+                # Worst negative EV (most negative)
+                negatives = [m for m in matches if m.get("ev", 0.0) < 0]
+                negatives.sort(key=lambda x: float(x.get("ev", 0.0)))
+                selected = negatives[:top_n]
+
+            elif top_n_type == "Legjobb EV":
+                # Best EV overall (highest values, can be positive or negative)
+                all_matches = list(matches)
+                all_matches.sort(key=lambda x: float(x.get("ev", 0.0)), reverse=True)
+                selected = all_matches[:top_n]
+
+            elif top_n_type == "Legrosszabb EV":
+                # Worst EV overall (lowest/most negative values)
+                all_matches = list(matches)
+                all_matches.sort(key=lambda x: float(x.get("ev", 0.0)))
+                selected = all_matches[:top_n]
+
+            else:
+                # Fallback to all matches
+                selected = matches
         else:
+            # No top-N filter, use all matches
             selected = matches
 
         cnt = len(selected)
@@ -2241,9 +2312,28 @@ def _compute_daily_model_stats(
         neg_cnt = len(neg_matches)
         pos_wins = sum(1 for m in pos_matches if m.get("win"))
         neg_wins = sum(1 for m in neg_matches if m.get("win"))
+
+        # Calculate BOTH normal and parlay profit
+        # Normal mode: sum individual profits
         pos_profit = sum(float(m.get("profit", 0.0)) for m in pos_matches)
         neg_profit = sum(float(m.get("profit", 0.0)) for m in neg_matches)
         profit_all = sum(float(m.get("profit", 0.0)) for m in selected)
+
+        # Parlay mode: all matches must win
+        if cnt > 0:
+            all_won = all(m.get("win") for m in selected)
+            if all_won:
+                # Multiply all odds together and subtract 1 for profit
+                combined_odds = 1.0
+                for m in selected:
+                    combined_odds *= float(m.get("odd", 1.0))
+                profit_parlay = combined_odds - 1.0
+            else:
+                # If any match lost, the entire parlay loses
+                profit_parlay = -1.0
+        else:
+            profit_parlay = 0.0
+
         total_profit += profit_all
         hit_rate = (wins / cnt * 100.0) if cnt else None
         roi_pos = (pos_profit / pos_cnt * 100.0) if pos_cnt else None
@@ -2251,6 +2341,7 @@ def _compute_daily_model_stats(
         hit_pos = (pos_wins / pos_cnt * 100.0) if pos_cnt else None
         hit_neg = (neg_wins / neg_cnt * 100.0) if neg_cnt else None
         daily_profit_list.append(profit_all)
+        daily_profit_list_parlay.append(profit_parlay)
         daily_details[day] = [
             {
                 "kickoff": (
@@ -2283,6 +2374,7 @@ def _compute_daily_model_stats(
                 "hit_pos": hit_pos,
                 "hit_neg": hit_neg,
                 "profit": profit_all,
+                "profit_parlay": profit_parlay,
             }
         )
         running += profit_all
@@ -2294,6 +2386,16 @@ def _compute_daily_model_stats(
         y_val = running + bankroll if bankroll is not None else running
         cumulative.append((day, y_val, running))
 
+        # Also track parlay cumulative
+        running_parlay += profit_parlay
+        if running_parlay > peak_parlay:
+            peak_parlay = running_parlay
+        dd_now_parlay = running_parlay - peak_parlay
+        if dd_now_parlay < max_dd_parlay:
+            max_dd_parlay = dd_now_parlay
+        y_val_parlay = running_parlay + bankroll if bankroll is not None else running_parlay
+        cumulative_parlay.append((day, y_val_parlay, running_parlay))
+
     std_val = None
     if len(daily_profit_list) >= 2:
         mean_val = sum(daily_profit_list) / len(daily_profit_list)
@@ -2302,12 +2404,25 @@ def _compute_daily_model_stats(
         )
         std_val = math.sqrt(variance)
 
+    # Calculate std for parlay as well
+    std_val_parlay = None
+    if len(daily_profit_list_parlay) >= 2:
+        mean_val_p = sum(daily_profit_list_parlay) / len(daily_profit_list_parlay)
+        variance_p = sum((x - mean_val_p) ** 2 for x in daily_profit_list_parlay) / (
+            len(daily_profit_list_parlay) - 1
+        )
+        std_val_parlay = math.sqrt(variance_p)
+
     risk = {"std": std_val, "max_drawdown": max_dd if daily_profit_list else None}
+    risk_parlay = {
+        "std": std_val_parlay,
+        "max_drawdown": max_dd_parlay if daily_profit_list_parlay else None,
+    }
 
     # Store details for row click popup
     setattr(state, "daily_match_details", daily_details)
 
-    return rows_out, cumulative, total_profit, risk
+    return rows_out, cumulative, cumulative_parlay, total_profit, risk, risk_parlay
 
 
 def _show_daily_match_details(state: AppState, day_key: str) -> None:
@@ -2958,7 +3073,67 @@ def _refresh_daily_stats_window(state: AppState) -> None:
             pass
         return
 
-    rows, cumulative, total_profit, risk = _compute_daily_model_stats(state)
+    rows, cumulative, cumulative_parlay, total_profit, risk, risk_parlay = (
+        _compute_daily_model_stats(state)
+    )
+
+    # Determine which modes are active based on checkboxes
+    show_napi_var = getattr(state, "daily_show_napi_var", None)
+    show_kotes_var = getattr(state, "daily_show_kotes_var", None)
+    show_napi = show_napi_var.get() if show_napi_var is not None else True
+    show_kotes = show_kotes_var.get() if show_kotes_var is not None else False
+
+    # Determine which data to use for chart
+    if show_napi and show_kotes:
+        # Both enabled: combine profits
+        # cumulative format: list of (date, bankroll_or_profit, raw_profit)
+        combined_cumulative = []
+        combined_daily_profits = []  # For std calculation
+
+        for cum_n, cum_p in zip(cumulative, cumulative_parlay):
+            if cum_n[0] == cum_p[0]:  # Same date
+                # Combine the raw profits (index 2) or bankroll values (index 1)
+                date_val = cum_n[0]
+                combined_value = cum_n[1] + cum_p[1]
+                combined_cumulative.append((date_val, combined_value))
+
+        # Calculate combined daily profits from rows
+        for r in rows:
+            daily_combined = r.get("profit", 0.0) + r.get("profit_parlay", 0.0)
+            combined_daily_profits.append(daily_combined)
+
+        # Calculate std for combined profits
+        std_val_combined = None
+        if len(combined_daily_profits) >= 2:
+            mean_val = sum(combined_daily_profits) / len(combined_daily_profits)
+            variance = sum((x - mean_val) ** 2 for x in combined_daily_profits) / (
+                len(combined_daily_profits) - 1
+            )
+            std_val_combined = math.sqrt(variance)
+
+        # Calculate max drawdown from combined cumulative
+        max_dd_combined = None
+        if combined_cumulative:
+            peak = 0.0
+            max_dd_combined = 0.0
+            for _, y_val in combined_cumulative:
+                # Extract just profit (without bankroll if present)
+                bankroll = getattr(state, "bankroll_amount", None)
+                profit_only = y_val - bankroll if bankroll is not None else y_val
+                if profit_only > peak:
+                    peak = profit_only
+                dd_now = profit_only - peak
+                if dd_now < max_dd_combined:
+                    max_dd_combined = dd_now
+
+        active_cumulative = combined_cumulative
+        active_risk = {"std": std_val_combined, "max_drawdown": max_dd_combined}
+    elif show_kotes:
+        active_cumulative = cumulative_parlay  # type: ignore[assignment]
+        active_risk = risk_parlay
+    else:
+        active_cumulative = cumulative  # type: ignore[assignment]
+        active_risk = risk
 
     # Info label
     try:
@@ -2968,15 +3143,29 @@ def _refresh_daily_stats_window(state: AppState) -> None:
         if bm_id_disp is not None and state.bm_names_by_id:
             bm_label = state.bm_names_by_id.get(int(bm_id_disp), str(bm_id_disp))
         total_matches = sum(r.get("count", 0) or 0 for r in rows)
-        std_val = risk.get("std") if isinstance(risk, dict) else None
-        dd_val = risk.get("max_drawdown") if isinstance(risk, dict) else None
+        std_val = active_risk.get("std") if isinstance(active_risk, dict) else None
+        dd_val = active_risk.get("max_drawdown") if isinstance(active_risk, dict) else None
         std_str = f"{std_val:.2f}" if std_val is not None else "-"
         dd_str = f"{dd_val:.2f}" if dd_val is not None else "-"
-        # Calculate overall ROI
-        overall_roi = (total_profit / total_matches * 100.0) if total_matches > 0 else 0.0
+
+        # Calculate overall ROI based on active profit types
+        if show_napi and show_kotes:
+            # Both: sum both profits
+            active_total = sum(r.get("profit", 0.0) + r.get("profit_parlay", 0.0) for r in rows)
+            mode_str = " (Kombin\u00e1lt)"
+        elif show_kotes:
+            # Only parlay
+            active_total = sum(r.get("profit_parlay", 0.0) for r in rows)
+            mode_str = " (K\u00f6t\u00e9s)"
+        else:
+            # Only normal (default)
+            active_total = sum(r.get("profit", 0.0) for r in rows)
+            mode_str = ""
+
+        overall_roi = (active_total / total_matches * 100.0) if total_matches > 0 else 0.0
         if info_var is not None:
             info_var.set(
-                f"Modell: {model_label} | Fogad\u00f3iroda: {bm_label} | Meccsek: {total_matches} | \u00d6sszprofit: {total_profit:+.2f} | ROI: {overall_roi:+.2f}% | Sz\u00f3r\u00e1s: {std_str} | Max DD: {dd_str}"
+                f"Modell: {model_label} | Fogad\u00f3iroda: {bm_label} | Meccsek: {total_matches} | \u00d6sszprofit: {active_total:+.2f} | ROI: {overall_roi:+.2f}%{mode_str} | Sz\u00f3r\u00e1s: {std_str} | Max DD: {dd_str}"
             )
     except Exception:
         if info_var is not None:
@@ -2984,7 +3173,7 @@ def _refresh_daily_stats_window(state: AppState) -> None:
 
     # Table
     try:
-        # Adjust visible columns based on Top-N (+EV only) selection
+        # Adjust visible columns based on Top-N selection
         try:
             cols_all = tuple(tv.cget("columns"))
         except Exception:
@@ -2993,15 +3182,42 @@ def _refresh_daily_stats_window(state: AppState) -> None:
             tn_var = getattr(state, "daily_top_n_var", None)
             tn_raw = tn_var.get().strip() if tn_var is not None else "-"
             tn_val = 0 if tn_raw == "-" else max(0, int(tn_raw))
-            hide_neg_cols = tn_val > 0
+
+            tn_type_var = getattr(state, "daily_top_n_type_var", None)
+            tn_type = tn_type_var.get().strip() if tn_type_var is not None else "Legjobb +EV"
+
+            # Determine which columns to hide based on selection type
+            hide_neg_cols = False
+            hide_pos_cols = False
+
+            if tn_val > 0:
+                if tn_type in ("Legjobb +EV", "Legrosszabb +EV"):
+                    hide_neg_cols = True  # Only showing +EV matches
+                elif tn_type in ("Legjobb -EV", "Legrosszabb -EV"):
+                    hide_pos_cols = True  # Only showing -EV matches
+                # For "Legjobb EV" and "Legrosszabb EV", show all columns
         except Exception:
             hide_neg_cols = False
+            hide_pos_cols = False
         if cols_all:
-            display_cols = [
-                c
-                for c in cols_all
-                if not (hide_neg_cols and c in ("-EV db", "ROI -EV", "-EV tal\u00e1lati %"))
-            ]
+            display_cols = []
+            for c in cols_all:
+                # Hide -EV columns if only Top +EV is selected
+                if hide_neg_cols and c in ("-EV db", "ROI -EV", "-EV tal\u00e1lati %"):
+                    continue
+                # Hide +EV columns if only Top -EV is selected
+                if hide_pos_cols and c in ("+EV db", "ROI +EV", "+EV tal\u00e1lati %"):
+                    continue
+                # Show/hide profit columns based on checkboxes
+                if c == "Napi profit" and not show_napi:
+                    continue
+                if c == "K\u00f6t\u00e9s profit" and not show_kotes:
+                    continue
+                # Show combined column only if both are selected
+                if c == "\u00d6ssz profit" and not (show_napi and show_kotes):
+                    continue
+                display_cols.append(c)
+
             try:
                 tv.configure(displaycolumns=display_cols)
             except Exception:
@@ -3020,11 +3236,30 @@ def _refresh_daily_stats_window(state: AppState) -> None:
             hit_pos_str = f"{hit_pos:.1f}%" if hit_pos is not None else "-"
             hit_neg_str = f"{hit_neg:.1f}%" if hit_neg is not None else "-"
             profit_str = f"{r.get('profit', 0.0):+.2f}"
-            tag = (
-                "roi_pos"
-                if r.get("profit", 0.0) > 0
-                else "roi_neg" if r.get("profit", 0.0) < 0 else ""
-            )
+            profit_parlay_str = f"{r.get('profit_parlay', 0.0):+.2f}"
+
+            # Calculate combined profit
+            combined_profit = r.get("profit", 0.0) + r.get("profit_parlay", 0.0)
+            combined_profit_str = f"{combined_profit:+.2f}"
+
+            # Determine tag based on selected profit modes
+            if show_napi and show_kotes:
+                # Both enabled: color based on combined profit
+                color_val = combined_profit
+            elif show_kotes:
+                # Only kotes: color based on parlay profit
+                color_val = r.get("profit_parlay", 0.0)
+            else:
+                # Only napi (default): color based on normal profit
+                color_val = r.get("profit", 0.0)
+
+            if color_val > 0:
+                tag = "roi_pos"
+            elif color_val < 0:
+                tag = "roi_neg"
+            else:
+                tag = ""
+
             tv.insert(
                 "",
                 "end",
@@ -3040,6 +3275,8 @@ def _refresh_daily_stats_window(state: AppState) -> None:
                     roi_pos_str,
                     roi_neg_str,
                     profit_str,
+                    profit_parlay_str,
+                    combined_profit_str,
                 ],
                 tags=(tag,) if tag else (),
             )
@@ -3050,10 +3287,10 @@ def _refresh_daily_stats_window(state: AppState) -> None:
     try:
         if ax is not None:
             ax.clear()
-            if cumulative:
-                xs = list(range(len(cumulative)))
-                ys = [p[1] for p in cumulative]
-                labels = [p[0] for p in cumulative]
+            if active_cumulative:
+                xs = list(range(len(active_cumulative)))
+                ys = [p[1] for p in active_cumulative]
+                labels = [p[0] for p in active_cumulative]
                 ax.plot(xs, ys, marker="o", color="#1f77b4")
                 tick_idx = xs
                 tick_labels = labels
@@ -3075,7 +3312,14 @@ def _refresh_daily_stats_window(state: AppState) -> None:
                     if getattr(state, "bankroll_amount", None) is not None
                     else "Profit (egys\u00e9g)"
                 )
-                ax.set_title("Napi profit alakul\u00e1sa")
+                # Set title based on checkbox states
+                if show_napi and show_kotes:
+                    title_suffix = " (Kombin\u00e1lt)"
+                elif show_kotes:
+                    title_suffix = " (K\u00f6t\u00e9s)"
+                else:
+                    title_suffix = ""
+                ax.set_title(f"Napi profit alakul\u00e1sa{title_suffix}")
                 ax.grid(True, linestyle=":", linewidth=0.5)
             else:
                 ax.text(0.5, 0.5, "Nincs adat", ha="center", va="center")
@@ -3136,15 +3380,19 @@ def _open_daily_stats_window(state: AppState) -> None:
             row=0, column=0, columnspan=2, sticky="we", padx=6, pady=(6, 4)
         )
 
-        # Filter row: all filters in one horizontal row
-        filter_frame = ttk.Frame(win)
-        filter_frame.grid(row=1, column=0, columnspan=2, sticky="ew", padx=6, pady=(0, 6))
+        # Filter rows: split into two rows for better layout
+        filter_frame_1 = ttk.Frame(win)
+        filter_frame_1.grid(row=1, column=0, columnspan=2, sticky="ew", padx=6, pady=(0, 3))
 
+        filter_frame_2 = ttk.Frame(win)
+        filter_frame_2.grid(row=2, column=0, columnspan=2, sticky="ew", padx=6, pady=(0, 6))
+
+        # First row filters
         # Start date filter
-        ttk.Label(filter_frame, text="Kezdő dátum:").pack(side=tk.LEFT, padx=(0, 3))
+        ttk.Label(filter_frame_1, text="Kezdő dátum:").pack(side=tk.LEFT, padx=(0, 3))
         start_date_var = tk.StringVar(value="")
         state.daily_start_date_var = start_date_var
-        start_date_entry = ttk.Entry(filter_frame, textvariable=start_date_var, width=12)
+        start_date_entry = ttk.Entry(filter_frame_1, textvariable=start_date_var, width=12)
         start_date_entry.pack(side=tk.LEFT, padx=(0, 15))
         start_date_entry.bind("<FocusOut>", lambda _e: _refresh_daily_stats_window(state))
         start_date_entry.bind("<Return>", lambda _e: _refresh_daily_stats_window(state))
@@ -3171,54 +3419,99 @@ def _open_daily_stats_window(state: AppState) -> None:
         except Exception:
             pass
 
-        # Top-N selector for +EV tippek
-        ttk.Label(filter_frame, text="Top +EV tippek / nap:").pack(side=tk.LEFT, padx=(0, 3))
+        # Top-N selector - number and type
+        ttk.Label(filter_frame_1, text="Top meccsek / nap:").pack(side=tk.LEFT, padx=(0, 3))
         top_n_var = tk.StringVar(value="-")
         state.daily_top_n_var = top_n_var
         top_n_combo = ttk.Combobox(
-            filter_frame,
+            filter_frame_1,
             textvariable=top_n_var,
             values=["-", "3", "5", "10"],
             state="readonly",
             width=3,
         )
-        top_n_combo.pack(side=tk.LEFT, padx=(0, 15))
+        top_n_combo.pack(side=tk.LEFT, padx=(0, 5))
         top_n_combo.bind("<<ComboboxSelected>>", lambda _e: _refresh_daily_stats_window(state))
 
+        # Top-N type selector
+        ttk.Label(filter_frame_1, text="Szemelv:").pack(side=tk.LEFT, padx=(0, 3))
+        top_n_type_var = tk.StringVar(value="Legjobb +EV")
+        state.daily_top_n_type_var = top_n_type_var
+        top_n_type_combo = ttk.Combobox(
+            filter_frame_1,
+            textvariable=top_n_type_var,
+            values=[
+                "Legjobb +EV",
+                "Legrosszabb +EV",
+                "Legjobb -EV",
+                "Legrosszabb -EV",
+                "Legjobb EV",
+                "Legrosszabb EV",
+            ],
+            state="readonly",
+            width=18,
+        )
+        top_n_type_combo.pack(side=tk.LEFT, padx=(0, 15))
+        top_n_type_combo.bind("<<ComboboxSelected>>", lambda _e: _refresh_daily_stats_window(state))
+
         # EV range selector
-        ttk.Label(filter_frame, text="EV tartom\u00e1ny:").pack(side=tk.LEFT, padx=(0, 3))
+        ttk.Label(filter_frame_1, text="EV tartom\u00e1ny:").pack(side=tk.LEFT, padx=(0, 3))
         ev_var = tk.StringVar(value="-")
         state.daily_ev_range_var = ev_var
         ev_options = ["-"] + [lbl for (lbl, _lo, _hi) in EV_BINS]
         ev_combo = ttk.Combobox(
-            filter_frame, textvariable=ev_var, values=ev_options, state="readonly", width=14
+            filter_frame_1, textvariable=ev_var, values=ev_options, state="readonly", width=14
         )
-        ev_combo.pack(side=tk.LEFT, padx=(0, 15))
+        ev_combo.pack(side=tk.LEFT, padx=(0, 0))
         ev_combo.bind("<<ComboboxSelected>>", lambda _e: _refresh_daily_stats_window(state))
 
+        # Second row filters
+        # Profit mode selector - checkboxes
+        ttk.Label(filter_frame_2, text="Profit n\u00e9zet:").pack(side=tk.LEFT, padx=(0, 3))
+
+        show_napi_var = tk.BooleanVar(value=True)
+        state.daily_show_napi_var = show_napi_var
+        napi_check = ttk.Checkbutton(
+            filter_frame_2,
+            text="Napi profit",
+            variable=show_napi_var,
+            command=lambda: _refresh_daily_stats_window(state),
+        )
+        napi_check.pack(side=tk.LEFT, padx=(0, 5))
+
+        show_kotes_var = tk.BooleanVar(value=False)
+        state.daily_show_kotes_var = show_kotes_var
+        kotes_check = ttk.Checkbutton(
+            filter_frame_2,
+            text="K\u00f6t\u00e9s profit",
+            variable=show_kotes_var,
+            command=lambda: _refresh_daily_stats_window(state),
+        )
+        kotes_check.pack(side=tk.LEFT, padx=(0, 15))
+
         # Odds range selector
-        ttk.Label(filter_frame, text="Odds tartom\u00e1ny:").pack(side=tk.LEFT, padx=(0, 3))
+        ttk.Label(filter_frame_2, text="Odds tartom\u00e1ny:").pack(side=tk.LEFT, padx=(0, 3))
         odds_var = tk.StringVar(value="-")
         state.daily_odds_range_var = odds_var
         odds_options = ["-"] + [lbl for (lbl, _lo, _hi) in ODDS_BINS]
         odds_combo = ttk.Combobox(
-            filter_frame, textvariable=odds_var, values=odds_options, state="readonly", width=16
+            filter_frame_2, textvariable=odds_var, values=odds_options, state="readonly", width=16
         )
         odds_combo.pack(side=tk.LEFT, padx=(0, 3))
 
         # Manual odds range inputs
-        ttk.Label(filter_frame, text="vagy Min:").pack(side=tk.LEFT, padx=(0, 2))
+        ttk.Label(filter_frame_2, text="vagy Min:").pack(side=tk.LEFT, padx=(0, 2))
         min_odds_var = tk.StringVar(value="")
         state.daily_min_odds_var = min_odds_var
-        min_odds_entry = ttk.Entry(filter_frame, textvariable=min_odds_var, width=6)
+        min_odds_entry = ttk.Entry(filter_frame_2, textvariable=min_odds_var, width=6)
         min_odds_entry.pack(side=tk.LEFT, padx=(0, 3))
         min_odds_entry.bind("<FocusOut>", lambda _e: _refresh_daily_stats_window(state))
         min_odds_entry.bind("<Return>", lambda _e: _refresh_daily_stats_window(state))
 
-        ttk.Label(filter_frame, text="Max:").pack(side=tk.LEFT, padx=(0, 2))
+        ttk.Label(filter_frame_2, text="Max:").pack(side=tk.LEFT, padx=(0, 2))
         max_odds_var = tk.StringVar(value="")
         state.daily_max_odds_var = max_odds_var
-        max_odds_entry = ttk.Entry(filter_frame, textvariable=max_odds_var, width=6)
+        max_odds_entry = ttk.Entry(filter_frame_2, textvariable=max_odds_var, width=6)
         max_odds_entry.pack(side=tk.LEFT, padx=(0, 15))
         max_odds_entry.bind("<FocusOut>", lambda _e: _refresh_daily_stats_window(state))
         max_odds_entry.bind("<Return>", lambda _e: _refresh_daily_stats_window(state))
@@ -3247,8 +3540,8 @@ def _open_daily_stats_window(state: AppState) -> None:
 
         odds_combo.bind("<<ComboboxSelected>>", _on_odds_combo_change)
 
-        # Bookmaker selector (per daily stats view)
-        ttk.Label(filter_frame, text="Liga:").pack(side=tk.LEFT, padx=(0, 3))
+        # League selector
+        ttk.Label(filter_frame_2, text="Liga:").pack(side=tk.LEFT, padx=(0, 3))
         league_var = tk.StringVar(value="-")
         state.daily_league_var = league_var
         league_options = ["-"]
@@ -3264,13 +3557,17 @@ def _open_daily_stats_window(state: AppState) -> None:
         # Store the mapping in state for use in filter logic
         state.daily_league_label_to_id = label_to_league_id
         league_combo = ttk.Combobox(
-            filter_frame, textvariable=league_var, values=league_options, state="readonly", width=40
+            filter_frame_2,
+            textvariable=league_var,
+            values=league_options,
+            state="readonly",
+            width=35,
         )
         league_combo.pack(side=tk.LEFT, padx=(0, 15))
         league_combo.bind("<<ComboboxSelected>>", lambda _e: _refresh_daily_stats_window(state))
 
-        # Bookmaker selector (per daily stats view)
-        ttk.Label(filter_frame, text="Fogadóiroda:").pack(side=tk.LEFT, padx=(0, 3))
+        # Bookmaker selector
+        ttk.Label(filter_frame_2, text="Fogadóiroda:").pack(side=tk.LEFT, padx=(0, 3))
         bm_var = tk.StringVar(value="-")
         state.daily_bm_var = bm_var
         bm_options = ["-"]
@@ -3282,14 +3579,14 @@ def _open_daily_stats_window(state: AppState) -> None:
         except Exception:
             pass
         bm_combo = ttk.Combobox(
-            filter_frame, textvariable=bm_var, values=bm_options, state="readonly", width=20
+            filter_frame_2, textvariable=bm_var, values=bm_options, state="readonly", width=25
         )
         bm_combo.pack(side=tk.LEFT, padx=(0, 0))
         bm_combo.bind("<<ComboboxSelected>>", lambda _e: _refresh_daily_stats_window(state))
 
         # Table and Chart layout side-by-side
         table_frame = ttk.Frame(win)
-        table_frame.grid(row=2, column=0, columnspan=2, sticky="nsew", padx=6, pady=(0, 6))
+        table_frame.grid(row=3, column=0, columnspan=2, sticky="nsew", padx=6, pady=(0, 6))
 
         cols = (
             "D\u00e1tum",
@@ -3302,6 +3599,8 @@ def _open_daily_stats_window(state: AppState) -> None:
             "ROI +EV",
             "ROI -EV",
             "Napi profit",
+            "K\u00f6t\u00e9s profit",
+            "\u00d6ssz profit",
         )
         tv = ttk.Treeview(table_frame, columns=cols, show="headings", height=12)
         widths = {
@@ -3315,6 +3614,8 @@ def _open_daily_stats_window(state: AppState) -> None:
             "ROI +EV": 90,
             "ROI -EV": 90,
             "Napi profit": 100,
+            "K\u00f6t\u00e9s profit": 100,
+            "\u00d6ssz profit": 100,
         }
         for c in cols:
             tv.heading(c, text=c)
@@ -3324,8 +3625,9 @@ def _open_daily_stats_window(state: AppState) -> None:
         tv.pack(side=tk.LEFT, fill="both", expand=True, padx=(0, 0))
         vsb.pack(side=tk.LEFT, fill="y")
         try:
-            tv.tag_configure("roi_pos", foreground="#006400")
-            tv.tag_configure("roi_neg", foreground="#8b0000")
+            # Simple foreground tags
+            tv.tag_configure("roi_pos", foreground="#006400")  # Dark green
+            tv.tag_configure("roi_neg", foreground="#8b0000")  # Dark red
         except Exception:
             pass
         try:
@@ -3341,7 +3643,7 @@ def _open_daily_stats_window(state: AppState) -> None:
 
         # Chart frame - fully responsive
         chart_frame = ttk.Frame(win)
-        chart_frame.grid(row=3, column=0, columnspan=2, sticky="nsew", padx=6, pady=(0, 6))
+        chart_frame.grid(row=4, column=0, columnspan=2, sticky="nsew", padx=6, pady=(0, 6))
         try:
             # Clean any half-loaded matplotlib modules to avoid circular import remnants
             import sys
@@ -3397,10 +3699,11 @@ def _open_daily_stats_window(state: AppState) -> None:
         except Exception:
             pass
 
-        # Let row 2 (table) and row 3 (chart) take the available height
-        win.grid_rowconfigure(1, weight=0)  # filter row - compact
-        win.grid_rowconfigure(2, weight=1)  # table
-        win.grid_rowconfigure(3, weight=3)  # chart larger
+        # Let rows grow properly: filters compact, table and chart expand
+        win.grid_rowconfigure(1, weight=0)  # filter row 1 - compact
+        win.grid_rowconfigure(2, weight=0)  # filter row 2 - compact
+        win.grid_rowconfigure(3, weight=1)  # table
+        win.grid_rowconfigure(4, weight=3)  # chart larger
         win.grid_columnconfigure(0, weight=1)
         state.daily_stats_window = win
 

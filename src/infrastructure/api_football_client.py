@@ -32,7 +32,8 @@ def _env_flag(value: Optional[str]) -> bool:
 
 
 _GLOBAL_LOG_RESPONSES = _env_flag(os.getenv("API_FOOTBALL_LOG_RESPONSES"))
-_MAX_CALLS_PER_SEC = 5
+_MAX_CALLS_PER_SEC = 4  # Reduced from 5 for extra safety
+_MAX_CALLS_PER_MIN = 270  # Set to 270 to stay safely under 300/min limit (10% buffer)
 
 
 def set_api_response_logging(enabled: bool) -> None:
@@ -86,6 +87,7 @@ class APIFootballClient:
         self._session.headers.update(default_headers)
         # Per-client throttle state (avoid cross-test/global interference)
         self._request_times_sec: deque[float] = deque(maxlen=100)
+        self._request_times_min: deque[float] = deque(maxlen=300)
 
     def _throttle_per_second(self) -> None:
         """Sleep just enough to keep API calls under the per-second cap."""
@@ -101,6 +103,28 @@ class APIFootballClient:
                 if sleep_for > 0:
                     time.sleep(sleep_for)
             self._request_times_sec.append(time.monotonic())
+        except Exception:
+            pass
+
+    def _throttle_per_minute(self) -> None:
+        """Sleep just enough to keep API calls under the per-minute cap."""
+        if _MAX_CALLS_PER_MIN <= 0:
+            return
+        try:
+            now = time.monotonic()
+            cutoff = now - 60.0
+            while self._request_times_min and self._request_times_min[0] < cutoff:
+                self._request_times_min.popleft()
+            if len(self._request_times_min) >= _MAX_CALLS_PER_MIN:
+                sleep_for = (self._request_times_min[0] + 60.0) - now
+                if sleep_for > 0:
+                    logger.info(
+                        "Rate limit: waiting %.2fs to stay under %d calls/minute",
+                        sleep_for,
+                        _MAX_CALLS_PER_MIN,
+                    )
+                    time.sleep(sleep_for)
+            self._request_times_min.append(time.monotonic())
         except Exception:
             pass
 
@@ -123,6 +147,7 @@ class APIFootballClient:
         while attempt <= self.max_retries:
             try:
                 self._throttle_per_second()
+                self._throttle_per_minute()
                 resp = self._session.request(
                     method="GET", url=url, params=norm_params, timeout=self.timeout
                 )
