@@ -1053,6 +1053,7 @@ class AppState:
     daily_top_n_type_var: tk.StringVar | None = None
     daily_show_napi_var: tk.BooleanVar | None = None
     daily_show_kotes_var: tk.BooleanVar | None = None
+    daily_system_bet_var: tk.StringVar | None = None
     # Bin details for drill-down
     odds_bin_matches: Dict[str, list[dict[str, Any]]] | None = None
     ev_bin_matches: Dict[str, list[dict[str, Any]]] | None = None
@@ -2313,10 +2314,17 @@ def _compute_daily_model_stats(
         pos_wins = sum(1 for m in pos_matches if m.get("win"))
         neg_wins = sum(1 for m in neg_matches if m.get("win"))
 
-        # Calculate BOTH normal and parlay profit
-        # Normal mode: sum individual profits
+        # Calculate statistics before append
+        hit_rate = (wins / cnt * 100.0) if cnt else None
         pos_profit = sum(float(m.get("profit", 0.0)) for m in pos_matches)
         neg_profit = sum(float(m.get("profit", 0.0)) for m in neg_matches)
+        roi_pos = (pos_profit / pos_cnt * 100.0) if pos_cnt else None
+        roi_neg = (neg_profit / neg_cnt * 100.0) if neg_cnt else None
+        hit_pos = (pos_wins / pos_cnt * 100.0) if pos_cnt else None
+        hit_neg = (neg_wins / neg_cnt * 100.0) if neg_cnt else None
+
+        # Calculate BOTH normal and parlay profit
+        # Normal mode: sum individual profits
         profit_all = sum(float(m.get("profit", 0.0)) for m in selected)
 
         # Parlay mode: all matches must win
@@ -2334,12 +2342,26 @@ def _compute_daily_model_stats(
         else:
             profit_parlay = 0.0
 
+        # System bet mode: calculate combinations (stored for later use)
+        # We'll store this in the row data and calculate later based on selected mode
+        rows_out.append(
+            {
+                "date": day,
+                "count": cnt,
+                "hit_rate": hit_rate,
+                "pos_count": pos_cnt,
+                "neg_count": neg_cnt,
+                "roi_pos": roi_pos,
+                "roi_neg": roi_neg,
+                "hit_pos": hit_pos,
+                "hit_neg": hit_neg,
+                "profit": profit_all,
+                "profit_parlay": profit_parlay,
+                "matches": selected,  # Store matches for system bet calculation
+            }
+        )
+
         total_profit += profit_all
-        hit_rate = (wins / cnt * 100.0) if cnt else None
-        roi_pos = (pos_profit / pos_cnt * 100.0) if pos_cnt else None
-        roi_neg = (neg_profit / neg_cnt * 100.0) if neg_cnt else None
-        hit_pos = (pos_wins / pos_cnt * 100.0) if pos_cnt else None
-        hit_neg = (neg_wins / neg_cnt * 100.0) if neg_cnt else None
         daily_profit_list.append(profit_all)
         daily_profit_list_parlay.append(profit_parlay)
         daily_details[day] = [
@@ -2362,21 +2384,6 @@ def _compute_daily_model_stats(
             for m in selected
         ]
 
-        rows_out.append(
-            {
-                "date": day,
-                "count": cnt,
-                "hit_rate": hit_rate,
-                "pos_count": pos_cnt,
-                "neg_count": neg_cnt,
-                "roi_pos": roi_pos,
-                "roi_neg": roi_neg,
-                "hit_pos": hit_pos,
-                "hit_neg": hit_neg,
-                "profit": profit_all,
-                "profit_parlay": profit_parlay,
-            }
-        )
         running += profit_all
         if running > peak:
             peak = running
@@ -3006,6 +3013,437 @@ def _compute_league_stats(
     return rows_out, summary
 
 
+def _calculate_system_bet_profit(matches: list[dict[str, Any]], system_type: str) -> float:
+    """Calculate profit for a system bet (combination) from given matches.
+
+    Args:
+        matches: List of match dictionaries with 'win' and 'odd' keys
+        system_type: Type of system bet (e.g., "Egyes kötés", "Teljes kötés", "3/2", etc.)
+
+    Returns:
+        Total profit from the system bet
+    """
+    from itertools import combinations
+
+    n = len(matches)
+    if n == 0:
+        return 0.0
+
+    # Parse system type
+    if system_type == "Egyes kötés":
+        # Individual bets (N/1)
+        return sum(float(m.get("profit", 0.0)) for m in matches)
+
+    elif system_type == "Teljes kötés":
+        # Full parlay (N/N)
+        if all(m.get("win") for m in matches):
+            combined_odds = 1.0
+            for m in matches:
+                combined_odds *= float(m.get("odd", 1.0))
+            return combined_odds - 1.0
+        else:
+            return -1.0
+
+    elif system_type == "Teljes + Egyes":
+        # Full parlay + Singles: N singles + 1 full parlay (N+1 bets total)
+        total_profit = 0.0
+
+        # N individual bets (singles)
+        for m in matches:
+            total_profit += float(m.get("profit", 0.0))
+
+        # 1 full parlay
+        if all(m.get("win") for m in matches):
+            combined_odds = 1.0
+            for m in matches:
+                combined_odds *= float(m.get("odd", 1.0))
+            total_profit += combined_odds - 1.0
+        else:
+            total_profit -= 1.0
+
+        return total_profit
+
+    elif system_type == "Trixie":
+        # Trixie: 3 doubles + 1 treble (4 bets total)
+        # Requires exactly 3 matches - fallback to singles if less
+        if n < 3:
+            # Not enough matches: use singles (egyes kötés)
+            return sum(float(m.get("profit", 0.0)) for m in matches)
+
+        total_profit = 0.0
+
+        # Use only first 3 matches
+        trixie_matches = matches[:3]
+
+        # 3 doubles (all pairs from 3 matches = C(3,2) = 3)
+        for combo in combinations(trixie_matches, 2):
+            if all(m.get("win") for m in combo):
+                combo_odds = 1.0
+                for m in combo:
+                    combo_odds *= float(m.get("odd", 1.0))
+                total_profit += combo_odds - 1.0
+            else:
+                total_profit -= 1.0
+
+        # 1 treble (all 3 matches)
+        if all(m.get("win") for m in trixie_matches):
+            treble_odds = 1.0
+            for m in trixie_matches:
+                treble_odds *= float(m.get("odd", 1.0))
+            total_profit += treble_odds - 1.0
+        else:
+            total_profit -= 1.0
+
+        return total_profit
+
+    elif system_type == "Patent":
+        # Patent: 3 singles + 3 doubles + 1 treble (7 bets total)
+        # Requires exactly 3 matches - fallback to singles if less
+        if n < 3:
+            # Not enough matches: use singles (egyes kötés)
+            return sum(float(m.get("profit", 0.0)) for m in matches)
+
+        total_profit = 0.0
+
+        # Use only first 3 matches
+        patent_matches = matches[:3]
+
+        # 3 singles
+        for m in patent_matches:
+            total_profit += float(m.get("profit", 0.0))
+
+        # 3 doubles (all pairs from 3 matches = C(3,2) = 3)
+        for combo in combinations(patent_matches, 2):
+            if all(m.get("win") for m in combo):
+                combo_odds = 1.0
+                for m in combo:
+                    combo_odds *= float(m.get("odd", 1.0))
+                total_profit += combo_odds - 1.0
+            else:
+                total_profit -= 1.0
+
+        # 1 treble (all 3 matches)
+        if all(m.get("win") for m in patent_matches):
+            treble_odds = 1.0
+            for m in patent_matches:
+                treble_odds *= float(m.get("odd", 1.0))
+            total_profit += treble_odds - 1.0
+        else:
+            total_profit -= 1.0
+
+        return total_profit
+
+    elif system_type == "Yankee":
+        # Yankee: 6 doubles + 4 trebles + 1 four-fold (11 bets total)
+        # Requires exactly 4 matches - fallback to singles if less
+        if n < 4:
+            # Not enough matches: use singles (egyes kötés)
+            return sum(float(m.get("profit", 0.0)) for m in matches)
+
+        total_profit = 0.0
+
+        # Use only first 4 matches
+        yankee_matches = matches[:4]
+
+        # 6 doubles (all pairs from 4 matches = C(4,2) = 6)
+        for combo in combinations(yankee_matches, 2):
+            if all(m.get("win") for m in combo):
+                combo_odds = 1.0
+                for m in combo:
+                    combo_odds *= float(m.get("odd", 1.0))
+                total_profit += combo_odds - 1.0
+            else:
+                total_profit -= 1.0
+
+        # 4 trebles (all triples from 4 matches = C(4,3) = 4)
+        for combo in combinations(yankee_matches, 3):  # type: ignore[assignment]
+            if all(m.get("win") for m in combo):
+                combo_odds = 1.0
+                for m in combo:
+                    combo_odds *= float(m.get("odd", 1.0))
+                total_profit += combo_odds - 1.0
+            else:
+                total_profit -= 1.0
+
+        # 1 four-fold (all 4 matches)
+        if all(m.get("win") for m in yankee_matches):
+            fourfold_odds = 1.0
+            for m in yankee_matches:
+                fourfold_odds *= float(m.get("odd", 1.0))
+            total_profit += fourfold_odds - 1.0
+        else:
+            total_profit -= 1.0
+
+        return total_profit
+
+    elif system_type == "Lucky 15":
+        # Lucky 15: 4 singles + 6 doubles + 4 trebles + 1 four-fold (15 bets total)
+        # Requires exactly 4 matches - fallback to singles if less
+        if n < 4:
+            # Not enough matches: use singles (egyes kötés)
+            return sum(float(m.get("profit", 0.0)) for m in matches)
+
+        total_profit = 0.0
+
+        # Use only first 4 matches
+        lucky15_matches = matches[:4]
+
+        # 4 singles
+        for m in lucky15_matches:
+            total_profit += float(m.get("profit", 0.0))
+
+        # 6 doubles (all pairs from 4 matches = C(4,2) = 6)
+        for combo in combinations(lucky15_matches, 2):
+            if all(m.get("win") for m in combo):
+                combo_odds = 1.0
+                for m in combo:
+                    combo_odds *= float(m.get("odd", 1.0))
+                total_profit += combo_odds - 1.0
+            else:
+                total_profit -= 1.0
+
+        # 4 trebles (all triples from 4 matches = C(4,3) = 4)
+        for combo in combinations(lucky15_matches, 3):  # type: ignore[assignment]
+            if all(m.get("win") for m in combo):
+                combo_odds = 1.0
+                for m in combo:
+                    combo_odds *= float(m.get("odd", 1.0))
+                total_profit += combo_odds - 1.0
+            else:
+                total_profit -= 1.0
+
+        # 1 four-fold (all 4 matches)
+        if all(m.get("win") for m in lucky15_matches):
+            fourfold_odds = 1.0
+            for m in lucky15_matches:
+                fourfold_odds *= float(m.get("odd", 1.0))
+            total_profit += fourfold_odds - 1.0
+        else:
+            total_profit -= 1.0
+
+        return total_profit
+
+    elif system_type == "Canadian":
+        # Canadian: 10 doubles + 10 trebles + 5 four-folds + 1 five-fold (26 bets total)
+        # Requires exactly 5 matches - fallback to singles if less
+        if n < 5:
+            # Not enough matches: use singles (egyes kötés)
+            return sum(float(m.get("profit", 0.0)) for m in matches)
+
+        total_profit = 0.0
+
+        # Use only first 5 matches
+        canadian_matches = matches[:5]
+
+        # 10 doubles (all pairs from 5 matches = C(5,2) = 10)
+        for combo in combinations(canadian_matches, 2):
+            if all(m.get("win") for m in combo):
+                combo_odds = 1.0
+                for m in combo:
+                    combo_odds *= float(m.get("odd", 1.0))
+                total_profit += combo_odds - 1.0
+            else:
+                total_profit -= 1.0
+
+        # 10 trebles (all triples from 5 matches = C(5,3) = 10)
+        for combo in combinations(canadian_matches, 3):  # type: ignore[assignment]
+            if all(m.get("win") for m in combo):
+                combo_odds = 1.0
+                for m in combo:
+                    combo_odds *= float(m.get("odd", 1.0))
+                total_profit += combo_odds - 1.0
+            else:
+                total_profit -= 1.0
+
+        # 5 four-folds (all 4-match combinations from 5 = C(5,4) = 5)
+        for combo in combinations(canadian_matches, 4):  # type: ignore[assignment]
+            if all(m.get("win") for m in combo):
+                combo_odds = 1.0
+                for m in combo:
+                    combo_odds *= float(m.get("odd", 1.0))
+                total_profit += combo_odds - 1.0
+            else:
+                total_profit -= 1.0
+
+        # 1 five-fold (all 5 matches)
+        if all(m.get("win") for m in canadian_matches):
+            fivefold_odds = 1.0
+            for m in canadian_matches:
+                fivefold_odds *= float(m.get("odd", 1.0))
+            total_profit += fivefold_odds - 1.0
+        else:
+            total_profit -= 1.0
+
+        return total_profit
+
+    elif system_type == "Lucky 31":
+        # Lucky 31: 5 singles + 10 doubles + 10 trebles + 5 four-folds + 1 five-fold (31 bets total)
+        # Requires exactly 5 matches - fallback to singles if less
+        if n < 5:
+            # Not enough matches: use singles (egyes kötés)
+            return sum(float(m.get("profit", 0.0)) for m in matches)
+
+        total_profit = 0.0
+
+        # Use only first 5 matches
+        lucky31_matches = matches[:5]
+
+        # 5 singles
+        for m in lucky31_matches:
+            total_profit += float(m.get("profit", 0.0))
+
+        # 10 doubles (all pairs from 5 matches = C(5,2) = 10)
+        for combo in combinations(lucky31_matches, 2):
+            if all(m.get("win") for m in combo):
+                combo_odds = 1.0
+                for m in combo:
+                    combo_odds *= float(m.get("odd", 1.0))
+                total_profit += combo_odds - 1.0
+            else:
+                total_profit -= 1.0
+
+        # 10 trebles (all triples from 5 matches = C(5,3) = 10)
+        for combo in combinations(lucky31_matches, 3):  # type: ignore[assignment]
+            if all(m.get("win") for m in combo):
+                combo_odds = 1.0
+                for m in combo:
+                    combo_odds *= float(m.get("odd", 1.0))
+                total_profit += combo_odds - 1.0
+            else:
+                total_profit -= 1.0
+
+        # 5 four-folds (all 4-match combinations from 5 = C(5,4) = 5)
+        for combo in combinations(lucky31_matches, 4):  # type: ignore[assignment]
+            if all(m.get("win") for m in combo):
+                combo_odds = 1.0
+                for m in combo:
+                    combo_odds *= float(m.get("odd", 1.0))
+                total_profit += combo_odds - 1.0
+            else:
+                total_profit -= 1.0
+
+        # 1 five-fold (all 5 matches)
+        if all(m.get("win") for m in lucky31_matches):
+            fivefold_odds = 1.0
+            for m in lucky31_matches:
+                fivefold_odds *= float(m.get("odd", 1.0))
+            total_profit += fivefold_odds - 1.0
+        else:
+            total_profit -= 1.0
+
+        return total_profit
+
+    elif "/" in system_type and not system_type.endswith("(Dupla)"):
+        # System bet (e.g., "2/3", "3/4")
+        # K/N means: from N matches, make all combinations of K matches
+        # Example: 2/3 = from 3 matches, all pairs (C(3,2) = 3 combinations)
+        parts = system_type.split("/")
+        try:
+            k = int(parts[0])  # Size of each combination
+            _ = int(parts[1])  # Expected number of matches (not used in calculation)
+        except (ValueError, IndexError):
+            return 0.0
+
+        # If not enough matches for this combination, fall back to individual
+        if k > n:
+            return sum(float(m.get("profit", 0.0)) for m in matches)
+        if k < 1:
+            return 0.0
+
+        # Generate all combinations of size k
+        total_profit = 0.0
+        for combo in combinations(matches, k):  # type: ignore[assignment]
+            # Check if all matches in this combination won
+            if all(m.get("win") for m in combo):
+                # Calculate parlay profit for this combination
+                combo_odds = 1.0
+                for m in combo:
+                    combo_odds *= float(m.get("odd", 1.0))
+                total_profit += combo_odds - 1.0
+            else:
+                # This combination lost
+                total_profit -= 1.0
+
+        return total_profit
+
+    return 0.0
+
+
+def _update_system_bet_options(state: AppState) -> None:
+    """Update system bet combo options based on selected top-N value."""
+    combo = getattr(state, "daily_system_bet_combo", None)
+    if combo is None:
+        return
+
+    # Get top-N value
+    top_n_var = getattr(state, "daily_top_n_var", None)
+    if top_n_var is None:
+        return
+
+    try:
+        top_n_str = top_n_var.get().strip()
+        if top_n_str == "-":
+            # No filter: only individual and full parlay
+            options = ["Egyes kötés", "Teljes kötés", "Teljes + Egyes"]
+        else:
+            top_n = int(top_n_str)
+
+            # TOP 1: Only singles (egyes kötés) make sense
+            if top_n == 1:
+                options = ["Egyes kötés"]
+            elif top_n == 2:
+                # TOP 2: Only base options (singles, full parlay, full + singles)
+                options = ["Egyes kötés", "Teljes kötés", "Teljes + Egyes"]
+            else:
+                # Base options always available
+                options = ["Egyes kötés", "Teljes kötés", "Teljes + Egyes"]
+
+            # Add combination options based on exact top_n value
+            # Each top_n level has its own specific combinations
+            if top_n == 3:
+                options.append("2/3")
+                options.append("Trixie")
+                options.append("Patent")
+            elif top_n == 4:
+                # TOP 4: 2/4, 3/4, Yankee, Lucky 15
+                options.append("2/4")
+                options.append("3/4")
+                options.append("Yankee")
+                options.append("Lucky 15")
+            elif top_n == 5:
+                options.append("2/5")
+                options.append("3/5")
+                options.append("4/5")
+                options.append("Canadian")
+                options.append("Lucky 31")
+            elif top_n == 10:
+                # TOP 10 combinations (matching Tippmix standard)
+                options.append("2/10")  # 45 bets: C(10,2) = 45
+                options.append("3/10")  # 120 bets: C(10,3) = 120
+                options.append("4/10")  # 210 bets: C(10,4) = 210
+                options.append("5/10")  # 252 bets: C(10,5) = 252
+                options.append("6/10")  # 210 bets: C(10,6) = 210
+                options.append("7/10")  # 120 bets: C(10,7) = 120
+                options.append("8/10")  # 45 bets: C(10,8) = 45
+                options.append("9/10")  # 10 bets: C(10,9) = 10
+    except (ValueError, AttributeError):
+        # Error case: only base options
+        options = ["Egyes kötés", "Teljes kötés", "Teljes + Egyes"]
+
+    # Update combo values
+    try:
+        current_value = combo.get()
+        combo.configure(values=options)
+
+        # Reset to "Egyes kötés" if current selection is no longer valid
+        if current_value not in options:
+            system_bet_var = getattr(state, "daily_system_bet_var", None)
+            if system_bet_var is not None:
+                system_bet_var.set("Egyes kötés")
+    except Exception:
+        pass
+
+
 def _refresh_daily_stats_window(state: AppState) -> None:
     win = getattr(state, "daily_stats_window", None)
     tv = getattr(state, "daily_stats_tree", None)
@@ -3077,63 +3515,75 @@ def _refresh_daily_stats_window(state: AppState) -> None:
         _compute_daily_model_stats(state)
     )
 
-    # Determine which modes are active based on checkboxes
-    show_napi_var = getattr(state, "daily_show_napi_var", None)
-    show_kotes_var = getattr(state, "daily_show_kotes_var", None)
-    show_napi = show_napi_var.get() if show_napi_var is not None else True
-    show_kotes = show_kotes_var.get() if show_kotes_var is not None else False
+    # Get selected system bet type
+    system_bet_var = getattr(state, "daily_system_bet_var", None)
+    system_bet_type = system_bet_var.get().strip() if system_bet_var is not None else "Egyes kötés"
 
-    # Determine which data to use for chart
-    if show_napi and show_kotes:
-        # Both enabled: combine profits
-        # cumulative format: list of (date, bankroll_or_profit, raw_profit)
-        combined_cumulative = []
-        combined_daily_profits = []  # For std calculation
+    # Calculate system bet profits for each row
+    cumulative_system: list[tuple[str, float, float]] = []
+    risk_system: dict[str, float | None] = {"std": None, "max_drawdown": None}
 
-        for cum_n, cum_p in zip(cumulative, cumulative_parlay):
-            if cum_n[0] == cum_p[0]:  # Same date
-                # Combine the raw profits (index 2) or bankroll values (index 1)
-                date_val = cum_n[0]
-                combined_value = cum_n[1] + cum_p[1]
-                combined_cumulative.append((date_val, combined_value))
-
-        # Calculate combined daily profits from rows
+    if system_bet_type == "Teljes kötés":
+        # Use existing parlay calculations
+        cumulative_system = list(cumulative_parlay)  # Copy to avoid reference issues
+        risk_system = risk_parlay
+        # Add system profit to rows
         for r in rows:
-            daily_combined = r.get("profit", 0.0) + r.get("profit_parlay", 0.0)
-            combined_daily_profits.append(daily_combined)
-
-        # Calculate std for combined profits
-        std_val_combined = None
-        if len(combined_daily_profits) >= 2:
-            mean_val = sum(combined_daily_profits) / len(combined_daily_profits)
-            variance = sum((x - mean_val) ** 2 for x in combined_daily_profits) / (
-                len(combined_daily_profits) - 1
-            )
-            std_val_combined = math.sqrt(variance)
-
-        # Calculate max drawdown from combined cumulative
-        max_dd_combined = None
-        if combined_cumulative:
-            peak = 0.0
-            max_dd_combined = 0.0
-            for _, y_val in combined_cumulative:
-                # Extract just profit (without bankroll if present)
-                bankroll = getattr(state, "bankroll_amount", None)
-                profit_only = y_val - bankroll if bankroll is not None else y_val
-                if profit_only > peak:
-                    peak = profit_only
-                dd_now = profit_only - peak
-                if dd_now < max_dd_combined:
-                    max_dd_combined = dd_now
-
-        active_cumulative = combined_cumulative
-        active_risk = {"std": std_val_combined, "max_drawdown": max_dd_combined}
-    elif show_kotes:
-        active_cumulative = cumulative_parlay  # type: ignore[assignment]
-        active_risk = risk_parlay
+            r["profit_system"] = r.get("profit_parlay", 0.0)
+    elif system_bet_type == "Egyes kötés":
+        # Use existing individual calculations
+        cumulative_system = list(cumulative)  # Copy to avoid reference issues
+        risk_system = risk
+        # Add system profit to rows
+        for r in rows:
+            r["profit_system"] = r.get("profit", 0.0)
     else:
-        active_cumulative = cumulative  # type: ignore[assignment]
-        active_risk = risk
+        # Calculate system bet profit for each day
+        daily_system_profits = []
+        running_profit = 0.0
+        bankroll = getattr(state, "bankroll_amount", None)
+
+        for r in rows:
+            matches = r.get("matches", [])
+            if not matches:
+                system_profit = 0.0
+            else:
+                system_profit = _calculate_system_bet_profit(matches, system_bet_type)
+
+            r["profit_system"] = system_profit
+            daily_system_profits.append(system_profit)
+            running_profit += system_profit
+
+            # Build cumulative with same format as existing
+            date_str = str(r.get("date") or "")
+            if bankroll is not None:
+                cumulative_system.append((date_str, bankroll + running_profit, running_profit))
+            else:
+                cumulative_system.append((date_str, running_profit, running_profit))
+
+        # Calculate risk metrics for system bet
+        if len(daily_system_profits) >= 2:
+            mean_val = sum(daily_system_profits) / len(daily_system_profits)
+            variance = sum((x - mean_val) ** 2 for x in daily_system_profits) / (
+                len(daily_system_profits) - 1
+            )
+            risk_system["std"] = math.sqrt(variance)
+
+        # Calculate max drawdown from system cumulative
+        if cumulative_system:
+            peak = 0.0
+            max_dd = 0.0
+            for _, y_val, raw_profit in cumulative_system:
+                if raw_profit > peak:
+                    peak = raw_profit
+                dd_now = raw_profit - peak
+                if dd_now < max_dd:
+                    max_dd = dd_now
+            risk_system["max_drawdown"] = max_dd
+
+    # Use system bet data for display
+    active_cumulative = cumulative_system
+    active_risk = risk_system
 
     # Info label
     try:
@@ -3148,19 +3598,9 @@ def _refresh_daily_stats_window(state: AppState) -> None:
         std_str = f"{std_val:.2f}" if std_val is not None else "-"
         dd_str = f"{dd_val:.2f}" if dd_val is not None else "-"
 
-        # Calculate overall ROI based on active profit types
-        if show_napi and show_kotes:
-            # Both: sum both profits
-            active_total = sum(r.get("profit", 0.0) + r.get("profit_parlay", 0.0) for r in rows)
-            mode_str = " (Kombin\u00e1lt)"
-        elif show_kotes:
-            # Only parlay
-            active_total = sum(r.get("profit_parlay", 0.0) for r in rows)
-            mode_str = " (K\u00f6t\u00e9s)"
-        else:
-            # Only normal (default)
-            active_total = sum(r.get("profit", 0.0) for r in rows)
-            mode_str = ""
+        # Calculate overall ROI based on system bet type
+        active_total = sum(r.get("profit_system", 0.0) for r in rows)
+        mode_str = f" ({system_bet_type})"
 
         overall_roi = (active_total / total_matches * 100.0) if total_matches > 0 else 0.0
         if info_var is not None:
@@ -3208,14 +3648,6 @@ def _refresh_daily_stats_window(state: AppState) -> None:
                 # Hide +EV columns if only Top -EV is selected
                 if hide_pos_cols and c in ("+EV db", "ROI +EV", "+EV tal\u00e1lati %"):
                     continue
-                # Show/hide profit columns based on checkboxes
-                if c == "Napi profit" and not show_napi:
-                    continue
-                if c == "K\u00f6t\u00e9s profit" and not show_kotes:
-                    continue
-                # Show combined column only if both are selected
-                if c == "\u00d6ssz profit" and not (show_napi and show_kotes):
-                    continue
                 display_cols.append(c)
 
             try:
@@ -3235,27 +3667,14 @@ def _refresh_daily_stats_window(state: AppState) -> None:
             roi_neg_str = f"{roi_neg:+.1f}%" if roi_neg is not None else "-"
             hit_pos_str = f"{hit_pos:.1f}%" if hit_pos is not None else "-"
             hit_neg_str = f"{hit_neg:.1f}%" if hit_neg is not None else "-"
-            profit_str = f"{r.get('profit', 0.0):+.2f}"
-            profit_parlay_str = f"{r.get('profit_parlay', 0.0):+.2f}"
 
-            # Calculate combined profit
-            combined_profit = r.get("profit", 0.0) + r.get("profit_parlay", 0.0)
-            combined_profit_str = f"{combined_profit:+.2f}"
+            # Use system bet profit for coloring and display
+            system_profit = r.get("profit_system", 0.0)
+            system_profit_str = f"{system_profit:+.2f}"
 
-            # Determine tag based on selected profit modes
-            if show_napi and show_kotes:
-                # Both enabled: color based on combined profit
-                color_val = combined_profit
-            elif show_kotes:
-                # Only kotes: color based on parlay profit
-                color_val = r.get("profit_parlay", 0.0)
-            else:
-                # Only napi (default): color based on normal profit
-                color_val = r.get("profit", 0.0)
-
-            if color_val > 0:
+            if system_profit > 0:
                 tag = "roi_pos"
-            elif color_val < 0:
+            elif system_profit < 0:
                 tag = "roi_neg"
             else:
                 tag = ""
@@ -3274,9 +3693,7 @@ def _refresh_daily_stats_window(state: AppState) -> None:
                     hit_neg_str,
                     roi_pos_str,
                     roi_neg_str,
-                    profit_str,
-                    profit_parlay_str,
-                    combined_profit_str,
+                    system_profit_str,  # Show system profit
                 ],
                 tags=(tag,) if tag else (),
             )
@@ -3312,13 +3729,8 @@ def _refresh_daily_stats_window(state: AppState) -> None:
                     if getattr(state, "bankroll_amount", None) is not None
                     else "Profit (egys\u00e9g)"
                 )
-                # Set title based on checkbox states
-                if show_napi and show_kotes:
-                    title_suffix = " (Kombin\u00e1lt)"
-                elif show_kotes:
-                    title_suffix = " (K\u00f6t\u00e9s)"
-                else:
-                    title_suffix = ""
+                # Set title based on system bet type
+                title_suffix = f" ({system_bet_type})"
                 ax.set_title(f"Napi profit alakul\u00e1sa{title_suffix}")
                 ax.grid(True, linestyle=":", linewidth=0.5)
             else:
@@ -3334,7 +3746,7 @@ def _refresh_daily_stats_window(state: AppState) -> None:
         pass
     if canvas is not None:
         try:
-            canvas.draw_idle()
+            canvas.draw()
         except Exception:
             pass
 
@@ -3426,12 +3838,17 @@ def _open_daily_stats_window(state: AppState) -> None:
         top_n_combo = ttk.Combobox(
             filter_frame_1,
             textvariable=top_n_var,
-            values=["-", "3", "5", "10"],
+            values=["-", "1", "2", "3", "4", "5", "10"],
             state="readonly",
             width=3,
         )
         top_n_combo.pack(side=tk.LEFT, padx=(0, 5))
-        top_n_combo.bind("<<ComboboxSelected>>", lambda _e: _refresh_daily_stats_window(state))
+
+        def _on_top_n_change(_e: Any = None) -> None:
+            _update_system_bet_options(state)
+            _refresh_daily_stats_window(state)
+
+        top_n_combo.bind("<<ComboboxSelected>>", _on_top_n_change)
 
         # Top-N type selector
         ttk.Label(filter_frame_1, text="Szemelv:").pack(side=tk.LEFT, padx=(0, 3))
@@ -3466,28 +3883,27 @@ def _open_daily_stats_window(state: AppState) -> None:
         ev_combo.bind("<<ComboboxSelected>>", lambda _e: _refresh_daily_stats_window(state))
 
         # Second row filters
-        # Profit mode selector - checkboxes
-        ttk.Label(filter_frame_2, text="Profit n\u00e9zet:").pack(side=tk.LEFT, padx=(0, 3))
+        # System bet selector (kombináció)
+        ttk.Label(filter_frame_2, text="Fogadás típus:").pack(side=tk.LEFT, padx=(0, 3))
 
-        show_napi_var = tk.BooleanVar(value=True)
-        state.daily_show_napi_var = show_napi_var
-        napi_check = ttk.Checkbutton(
+        system_bet_var = tk.StringVar(value="Egyes kötés")
+        state.daily_system_bet_var = system_bet_var
+        system_bet_combo = ttk.Combobox(
             filter_frame_2,
-            text="Napi profit",
-            variable=show_napi_var,
-            command=lambda: _refresh_daily_stats_window(state),
+            textvariable=system_bet_var,
+            values=[
+                "Egyes kötés",
+                "Teljes kötés",
+                "Teljes + Egyes",
+            ],  # Default values, will be updated dynamically
+            state="readonly",
+            width=15,
         )
-        napi_check.pack(side=tk.LEFT, padx=(0, 5))
+        system_bet_combo.pack(side=tk.LEFT, padx=(0, 15))
+        system_bet_combo.bind("<<ComboboxSelected>>", lambda _e: _refresh_daily_stats_window(state))
 
-        show_kotes_var = tk.BooleanVar(value=False)
-        state.daily_show_kotes_var = show_kotes_var
-        kotes_check = ttk.Checkbutton(
-            filter_frame_2,
-            text="K\u00f6t\u00e9s profit",
-            variable=show_kotes_var,
-            command=lambda: _refresh_daily_stats_window(state),
-        )
-        kotes_check.pack(side=tk.LEFT, padx=(0, 15))
+        # Store reference for dynamic updates
+        state.daily_system_bet_combo = system_bet_combo  # type: ignore[attr-defined]
 
         # Odds range selector
         ttk.Label(filter_frame_2, text="Odds tartom\u00e1ny:").pack(side=tk.LEFT, padx=(0, 3))
@@ -3598,9 +4014,7 @@ def _open_daily_stats_window(state: AppState) -> None:
             "-EV tal\u00e1lati %",
             "ROI +EV",
             "ROI -EV",
-            "Napi profit",
-            "K\u00f6t\u00e9s profit",
-            "\u00d6ssz profit",
+            "Profit",
         )
         tv = ttk.Treeview(table_frame, columns=cols, show="headings", height=12)
         widths = {
@@ -3613,9 +4027,7 @@ def _open_daily_stats_window(state: AppState) -> None:
             "-EV tal\u00e1lati %": 110,
             "ROI +EV": 90,
             "ROI -EV": 90,
-            "Napi profit": 100,
-            "K\u00f6t\u00e9s profit": 100,
-            "\u00d6ssz profit": 100,
+            "Profit": 100,
         }
         for c in cols:
             tv.heading(c, text=c)
@@ -3863,7 +4275,7 @@ def _open_league_stats_window(state: AppState) -> None:
         top_combo = ttk.Combobox(
             filter_frame,
             textvariable=top_n_var,
-            values=["-", "3", "5", "10"],
+            values=["-", "1", "2", "3", "4", "5", "10"],
             state="readonly",
             width=6,
         )
