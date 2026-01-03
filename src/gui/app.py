@@ -3603,9 +3603,64 @@ def _refresh_daily_stats_window(state: AppState) -> None:
         mode_str = f" ({system_bet_type})"
 
         overall_roi = (active_total / total_matches * 100.0) if total_matches > 0 else 0.0
+
+        # Calculate risk metrics
+        win_days = sum(1 for r in rows if r.get("profit_system", 0.0) > 0)
+        total_days = len(rows)
+        win_rate = (win_days / total_days * 100.0) if total_days > 0 else 0.0
+
+        # Sharpe-like ratio: average daily profit / std dev
+        sharpe_ratio = (
+            (active_total / total_days / std_val)
+            if (total_days > 0 and std_val and std_val > 0)
+            else None
+        )
+        sharpe_str = f"{sharpe_ratio:.2f}" if sharpe_ratio is not None else "-"
+
+        # Sortino Ratio: only considers downside volatility (negative returns)
+        # Downside deviation: only negative deviations from 0 (MAR = 0)
+        daily_profits = [r.get("profit_system", 0.0) for r in rows]
+        sortino_ratio = None
+        if total_days >= 2:
+            # Downside deviation: sum of squared negative deviations from 0
+            downside_deviations_sq = [min(0, p) ** 2 for p in daily_profits]
+            downside_var = sum(downside_deviations_sq) / total_days
+            downside_std = math.sqrt(downside_var)
+            if downside_std > 0:
+                avg_daily_profit = active_total / total_days
+                sortino_ratio = avg_daily_profit / downside_std
+        sortino_str = f"{sortino_ratio:.2f}" if sortino_ratio is not None else "-"
+
+        # Profit Factor: sum of wins / sum of losses (absolute value)
+        wins_sum = sum(p for p in daily_profits if p > 0)
+        losses_sum = abs(sum(p for p in daily_profits if p < 0))
+        profit_factor = wins_sum / losses_sum if losses_sum > 0 else None
+        profit_factor_str = f"{profit_factor:.2f}" if profit_factor is not None else "-"
+
+        # Recovery Factor: total profit / abs(max drawdown)
+        # Measures how quickly system recovers from losses
+        recovery_factor = (
+            (active_total / abs(dd_val)) if (dd_val is not None and dd_val != 0) else None
+        )
+        recovery_factor_str = f"{recovery_factor:.2f}" if recovery_factor is not None else "-"
+
+        # Largest Win Impact: percentage of total profit from single biggest win day
+        # High values (>50%) indicate dangerous dependency on one lucky day
+        max_daily_profit = max(daily_profits) if daily_profits else 0.0
+        largest_win_impact = (
+            (max_daily_profit / active_total * 100.0)
+            if (active_total > 0 and max_daily_profit > 0)
+            else None
+        )
+        largest_win_str = f"{largest_win_impact:.0f}%" if largest_win_impact is not None else "-"
+
         if info_var is not None:
             info_var.set(
-                f"Modell: {model_label} | Fogad\u00f3iroda: {bm_label} | Meccsek: {total_matches} | \u00d6sszprofit: {active_total:+.2f} | ROI: {overall_roi:+.2f}%{mode_str} | Sz\u00f3r\u00e1s: {std_str} | Max DD: {dd_str}"
+                f"Modell: {model_label} | Fogadóiroda: {bm_label} | Meccsek: {total_matches} | "
+                f"Összprofit: {active_total:+.2f} | ROI: {overall_roi:+.2f}%{mode_str} | "
+                f"Szórás: {std_str} | Max DD: {dd_str} | Win Rate: {win_rate:.1f}% | "
+                f"Sharpe: {sharpe_str} | Sortino: {sortino_str} | PF: {profit_factor_str} | "
+                f"Recovery: {recovery_factor_str} | Max Win: {largest_win_str}"
             )
     except Exception:
         if info_var is not None:
