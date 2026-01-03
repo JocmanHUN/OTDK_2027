@@ -1054,6 +1054,7 @@ class AppState:
     daily_show_napi_var: tk.BooleanVar | None = None
     daily_show_kotes_var: tk.BooleanVar | None = None
     daily_system_bet_var: tk.StringVar | None = None
+    daily_grouping_mode_var: tk.StringVar | None = None
     # Bin details for drill-down
     odds_bin_matches: Dict[str, list[dict[str, Any]]] | None = None
     ev_bin_matches: Dict[str, list[dict[str, Any]]] | None = None
@@ -2120,6 +2121,27 @@ def _compute_daily_model_stats(
     daily_details: Dict[str, list[dict[str, Any]]] = {}
     total_profit = 0.0
 
+    # Get grouping mode (Naponta or Időblokkok)
+    grouping_mode = "Naponta"
+    try:
+        grouping_mode_var = getattr(state, "daily_grouping_mode_var", None)
+        if grouping_mode_var is not None:
+            grouping_mode = grouping_mode_var.get().strip()
+    except Exception:
+        pass
+
+    # Extract time window from grouping mode (e.g., "Időblokkok (30p)" -> 30)
+    time_window_minutes = 30  # default
+    if "Időblokkok" in grouping_mode:
+        try:
+            import re
+
+            match = re.search(r"\((\d+)p\)", grouping_mode)
+            if match:
+                time_window_minutes = int(match.group(1))
+        except Exception:
+            pass
+
     # Get start date filter
     start_date_filter = None
     try:
@@ -2209,7 +2231,26 @@ def _compute_daily_model_stats(
                     dt = dt.astimezone(ZoneInfo("Europe/Budapest"))
                 except Exception:
                     pass
-                day_key = dt.strftime("%Y-%m-%d")
+
+                # Generate grouping key based on mode
+                if grouping_mode == "Naponta":
+                    # Daily grouping: same as before
+                    day_key = dt.strftime("%Y-%m-%d")
+                else:
+                    # Time block grouping: round to nearest time window
+                    # Round down to nearest time_window_minutes block
+                    total_minutes = dt.hour * 60 + dt.minute
+                    block_start_minutes = (
+                        total_minutes // time_window_minutes
+                    ) * time_window_minutes
+                    block_start_time = dt.replace(
+                        hour=block_start_minutes // 60,
+                        minute=block_start_minutes % 60,
+                        second=0,
+                        microsecond=0,
+                    )
+                    # Key format: "YYYY-MM-DD HH:MM" for blocks
+                    day_key = block_start_time.strftime("%Y-%m-%d %H:%M")
             except Exception:
                 day_key = str(date_s)[:10]
 
@@ -3654,9 +3695,22 @@ def _refresh_daily_stats_window(state: AppState) -> None:
         )
         largest_win_str = f"{largest_win_impact:.0f}%" if largest_win_impact is not None else "-"
 
+        # Get grouping mode for display
+        grouping_mode_str = "Naponta"
+        try:
+            grouping_mode_var = getattr(state, "daily_grouping_mode_var", None)
+            if grouping_mode_var is not None:
+                grouping_mode_str = grouping_mode_var.get().strip()
+        except Exception:
+            pass
+
+        # Adjust display text based on grouping mode
+        period_label = "napok" if grouping_mode_str == "Naponta" else "blokkok"
+
         if info_var is not None:
             info_var.set(
                 f"Modell: {model_label} | Fogadóiroda: {bm_label} | Meccsek: {total_matches} | "
+                f"Csoportosítás: {grouping_mode_str} ({total_days} {period_label}) | "
                 f"Összprofit: {active_total:+.2f} | ROI: {overall_roi:+.2f}%{mode_str} | "
                 f"Szórás: {std_str} | Max DD: {dd_str} | Win Rate: {win_rate:.1f}% | "
                 f"Sharpe: {sharpe_str} | Sortino: {sortino_str} | PF: {profit_factor_str} | "
@@ -3763,16 +3817,71 @@ def _refresh_daily_stats_window(state: AppState) -> None:
                 xs = list(range(len(active_cumulative)))
                 ys = [p[1] for p in active_cumulative]
                 labels = [p[0] for p in active_cumulative]
-                ax.plot(xs, ys, marker="o", color="#1f77b4")
-                tick_idx = xs
-                tick_labels = labels
+                ax.plot(xs, ys, marker="o", color="#1f77b4", markersize=3)
+
+                # Smart label selection based on data density
+                num_points = len(labels)
+
+                # Determine if we're in time block mode
+                is_time_block = False
+                try:
+                    grouping_mode_var = getattr(state, "daily_grouping_mode_var", None)
+                    if grouping_mode_var is not None:
+                        grouping_mode = grouping_mode_var.get().strip()
+                        is_time_block = "Időblokkok" in grouping_mode
+                except Exception:
+                    pass
+
+                if is_time_block:
+                    # Time block mode: show fewer labels with smart sampling
+                    # Calculate optimal step to show ~15-20 labels max
+                    max_labels = 20
+                    step = max(1, num_points // max_labels)
+
+                    # Create shorter labels for time blocks (show only time if same day)
+                    short_labels = []
+                    last_date = None
+                    for lbl in labels:
+                        try:
+                            # Format: "YYYY-MM-DD HH:MM"
+                            if " " in lbl:
+                                date_part, time_part = lbl.split(" ", 1)
+                                # Show date + time for first occurrence of each day
+                                if date_part != last_date:
+                                    short_labels.append(f"{date_part}\n{time_part}")
+                                    last_date = date_part
+                                else:
+                                    # Show only time for same day
+                                    short_labels.append(time_part)
+                            else:
+                                short_labels.append(lbl)
+                        except Exception:
+                            short_labels.append(lbl)
+
+                    # Select which indices to show
+                    tick_idx = list(range(0, num_points, step))
+                    # Always include last point
+                    if (num_points - 1) not in tick_idx:
+                        tick_idx.append(num_points - 1)
+
+                    tick_labels = [short_labels[i] for i in tick_idx]
+
+                    # Set smaller font for time blocks
+                    ax.set_xticks(tick_idx)
+                    ax.set_xticklabels(tick_labels, rotation=45, ha="right", fontsize=7)
+                else:
+                    # Daily mode: show all labels (as before)
+                    tick_idx = xs
+                    tick_labels = labels
+                    ax.set_xticks(tick_idx)
+                    ax.set_xticklabels(tick_labels, rotation=45, ha="right", fontsize=8)
+
                 baseline = getattr(state, "bankroll_amount", None)
                 if baseline is not None:
                     ax.axhline(y=baseline, color="#888888", linestyle="--", linewidth=1.0)
                 else:
                     ax.axhline(y=0.0, color="#888888", linestyle="--", linewidth=1.0)
-                ax.set_xticks(tick_idx)
-                ax.set_xticklabels(tick_labels, rotation=45, ha="right", fontsize=8)
+
                 try:
                     fig = getattr(state, "daily_profit_fig", None)
                     if fig is not None:
@@ -3938,6 +4047,22 @@ def _open_daily_stats_window(state: AppState) -> None:
         ev_combo.bind("<<ComboboxSelected>>", lambda _e: _refresh_daily_stats_window(state))
 
         # Second row filters
+        # Grouping mode selector (new!)
+        ttk.Label(filter_frame_2, text="Csoportosítás:").pack(side=tk.LEFT, padx=(0, 3))
+        grouping_mode_var = tk.StringVar(value="Naponta")
+        state.daily_grouping_mode_var = grouping_mode_var
+        grouping_mode_combo = ttk.Combobox(
+            filter_frame_2,
+            textvariable=grouping_mode_var,
+            values=["Naponta", "Időblokkok (30p)", "Időblokkok (60p)", "Időblokkok (90p)"],
+            state="readonly",
+            width=18,
+        )
+        grouping_mode_combo.pack(side=tk.LEFT, padx=(0, 15))
+        grouping_mode_combo.bind(
+            "<<ComboboxSelected>>", lambda _e: _refresh_daily_stats_window(state)
+        )
+
         # System bet selector (kombináció)
         ttk.Label(filter_frame_2, text="Fogadás típus:").pack(side=tk.LEFT, padx=(0, 3))
 
