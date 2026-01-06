@@ -4015,7 +4015,7 @@ def _open_daily_stats_window(state: AppState) -> None:
         top_n_combo.bind("<<ComboboxSelected>>", _on_top_n_change)
 
         # Top-N type selector
-        ttk.Label(filter_frame_1, text="Szemelv:").pack(side=tk.LEFT, padx=(0, 3))
+        ttk.Label(filter_frame_1, text="Feltétel:").pack(side=tk.LEFT, padx=(0, 3))
         top_n_type_var = tk.StringVar(value="Legjobb +EV")
         state.daily_top_n_type_var = top_n_type_var
         top_n_type_combo = ttk.Combobox(
@@ -4043,8 +4043,31 @@ def _open_daily_stats_window(state: AppState) -> None:
         ev_combo = ttk.Combobox(
             filter_frame_1, textvariable=ev_var, values=ev_options, state="readonly", width=14
         )
-        ev_combo.pack(side=tk.LEFT, padx=(0, 0))
+        ev_combo.pack(side=tk.LEFT, padx=(0, 15))
         ev_combo.bind("<<ComboboxSelected>>", lambda _e: _refresh_daily_stats_window(state))
+
+        # Auto optimizer selector
+        ttk.Label(filter_frame_1, text="Auto optimalizálás:").pack(side=tk.LEFT, padx=(0, 3))
+        auto_opt_var = tk.StringVar(value="Ki")
+        state.daily_auto_optimizer_var = auto_opt_var  # type: ignore[attr-defined]
+        auto_opt_options = [
+            "Ki",
+            "Legjobb (komplex)",
+            "Max Profit",
+            "Max ROI %",
+            "Max Nyerési %",
+            "Max Sharpe",
+            "Min Drawdown",
+        ]
+        auto_opt_combo = ttk.Combobox(
+            filter_frame_1,
+            textvariable=auto_opt_var,
+            values=auto_opt_options,
+            state="readonly",
+            width=15,
+        )
+        auto_opt_combo.pack(side=tk.LEFT, padx=(0, 0))
+        auto_opt_combo.bind("<<ComboboxSelected>>", lambda _e: _apply_auto_optimization(state))
 
         # Second row filters
         # Grouping mode selector (new!)
@@ -4628,6 +4651,766 @@ def _refresh_odds_bins_window(state: AppState) -> None:
             )
     except Exception:
         pass
+
+
+def _apply_auto_optimization(state: AppState) -> None:
+    """
+    Apply automatic filter optimization based on selected metric.
+    Finds the best filter combination and applies it to the current view.
+    """
+    auto_opt_var = getattr(state, "daily_auto_optimizer_var", None)
+    if auto_opt_var is None:
+        return
+
+    selected_metric = auto_opt_var.get()
+    print(f"[OPTIMIZER] Selected metric: '{selected_metric}'")
+
+    if selected_metric == "Ki":
+        # Reset to manual mode - enable all filters
+        _enable_manual_filters(state)
+        _refresh_daily_stats_window(state)
+        return
+
+    # Disable manual filter controls during optimization
+    _disable_manual_filters(state)
+
+    # Get current model
+    model_key = state.selected_model_key
+    if model_key is None:
+        auto_opt_var.set("Ki")
+        _enable_manual_filters(state)
+        return
+
+    conn = state.conn
+    if conn is None:
+        auto_opt_var.set("Ki")
+        _enable_manual_filters(state)
+        return
+
+    try:
+        # Get start date and league filters from GUI
+        start_date_filter = None
+        try:
+            start_date_var = getattr(state, "daily_start_date_var", None)
+            if start_date_var is not None:
+                start_date_str = start_date_var.get().strip()
+                if start_date_str and start_date_str != "YYYY-MM-DD":
+                    try:
+                        from datetime import datetime as dt_parse
+
+                        start_date_filter = dt_parse.strptime(start_date_str, "%Y-%m-%d").date()
+                    except ValueError:
+                        start_date_filter = None
+        except Exception:
+            start_date_filter = None
+
+        league_filter = None
+        try:
+            league_var = getattr(state, "daily_league_var", None)
+            if league_var is not None:
+                selected_label = league_var.get().strip() or "-"
+                label_to_id_map = getattr(state, "daily_league_label_to_id", None) or {}
+                league_str = label_to_id_map.get(selected_label, "-")
+                if league_str != "-":
+                    league_filter = int(league_str)
+        except Exception:
+            league_filter = None
+
+        # Get all completed matches with predictions for this model
+        # Apply date and league filters like the main view does
+        matches_query = """
+            SELECT m.match_id, m.date, m.home_team, m.away_team, 
+                   m.real_result, m.league_id
+            FROM matches m
+            WHERE m.real_result IN ('1', 'X', '2')
+            ORDER BY m.date
+        """
+        all_matches_raw = conn.execute(matches_query).fetchall()
+
+        # Apply GUI filters
+        all_matches = []
+        for row in all_matches_raw:
+            mid, date_s, home, away, result, league_id = row
+
+            # Check start date filter
+            if start_date_filter is not None:
+                try:
+                    match_date = datetime.fromisoformat(str(date_s)).date()
+                    if match_date < start_date_filter:
+                        continue
+                except Exception:
+                    pass
+
+            # Check league filter
+            if league_filter is not None:
+                try:
+                    match_league_id = int(league_id) if league_id is not None else None
+                    if match_league_id != league_filter:
+                        continue
+                except Exception:
+                    pass
+
+            # Keep only the first 5 fields for compatibility
+            all_matches.append((mid, date_s, home, away, result))
+
+        if not all_matches:
+            print("[OPTIMIZER] Nincs meccs a szűrők alkalmazása után!")
+            auto_opt_var.set("Ki")
+            _enable_manual_filters(state)
+            return
+
+        # Get predictions for this model only - including aliases
+        model_keys = _alias_keys_for(str(model_key))
+        placeholders = ",".join("?" for _ in model_keys) or "?"
+        preds_query = f"""
+            SELECT p.match_id, p.prob_home, p.prob_draw, p.prob_away,
+                   p.predicted_result
+            FROM predictions p
+            WHERE p.model_name IN ({placeholders})
+        """
+        all_preds = conn.execute(preds_query, tuple(model_keys)).fetchall()
+
+        # Build predictions map
+        preds_by_match: Dict[int, Tuple[float, float, float, str | None]] = {}
+        for mid, ph, pd, pa, pred in all_preds:
+            preds_by_match[mid] = (float(ph), float(pd), float(pa), pred)
+
+        # Számítsuk ki a napok számát
+        unique_dates = set()
+        for match in all_matches:
+            mid, date_str, home, away, result = match
+            try:
+                dt = datetime.fromisoformat(date_str)
+                day_key = dt.strftime("%Y-%m-%d")
+                unique_dates.add(day_key)
+            except Exception:
+                pass
+
+        # Debug: check if we have predictions for this model
+        print("[OPTIMIZER] ═══════════════════════════════════════")
+        print(f"[OPTIMIZER] Model: {model_key}")
+        print(f"[OPTIMIZER] Összes meccs (szűrés után): {len(all_matches)}")
+        print(f"[OPTIMIZER] Predikciók száma: {len(preds_by_match)}")
+        print(f"[OPTIMIZER] Napok száma: {len(unique_dates)}")
+        print("[OPTIMIZER] ═══════════════════════════════════════")
+
+        if not preds_by_match:
+            print(f"[OPTIMIZER] HIBA: Nincs predikció a {model_key} modellhez!")
+            print("[OPTIMIZER] Válts át másik modellre a főablakban (Model legördülő menü)!")
+            auto_opt_var.set("Ki")
+            _enable_manual_filters(state)
+            return
+
+        if len(preds_by_match) < 100:
+            print(f"[OPTIMIZER] FIGYELMEZTETÉS: Csak {len(preds_by_match)} predikció van!")
+            print("[OPTIMIZER] Az optimalizálás kevés adattal fog dolgozni.")
+
+        # Get all odds
+        odds_query = """
+            SELECT o.match_id, o.bookmaker_id, o.odds_home, o.odds_draw, o.odds_away,
+                   b.name
+            FROM odds o
+            LEFT JOIN bookmakers b ON o.bookmaker_id = b.bookmaker_id
+        """
+        all_odds = conn.execute(odds_query).fetchall()
+
+        # Build odds map and track best odds
+        odds_by_match: Dict[int, Dict[int | None, Tuple[float, float, float, str]]] = {}
+        best_odds_by_match: Dict[int, Tuple[float, float, float]] = {}
+
+        for mid, bid, oh, od, oa, bname in all_odds:
+            if mid not in odds_by_match:
+                odds_by_match[mid] = {}
+            odds_by_match[mid][bid] = (float(oh), float(od), float(oa), bname or "Unknown")
+
+            if mid not in best_odds_by_match:
+                best_odds_by_match[mid] = (float(oh), float(od), float(oa))
+            else:
+                curr_best = best_odds_by_match[mid]
+                best_odds_by_match[mid] = (
+                    max(curr_best[0], float(oh)),
+                    max(curr_best[1], float(od)),
+                    max(curr_best[2], float(oa)),
+                )
+
+        # Add best odds as special bookmaker
+        for mid, (oh, od, oa) in best_odds_by_match.items():
+            if mid in odds_by_match:
+                odds_by_match[mid][None] = (oh, od, oa, "Legjobb")
+
+        bookmaker_ids_list = sorted(
+            [b for odds_dict in odds_by_match.values() for b in odds_dict.keys() if b is not None]
+        )
+        bookmaker_ids = sorted(set(bookmaker_ids_list)) + [None]
+
+        # Debug: print bookmaker count
+        print(f"[OPTIMIZER] Tesztelendő fogadóirodák száma: {len(bookmaker_ids)}")
+        print(f"[OPTIMIZER] Fogadóiroda ID-k: {bookmaker_ids[:10]}...")  # First 10
+
+        # Define search space - use GUI options only
+        # Odds ranges from ODDS_BINS
+        odds_ranges = [("Összes", None, None)] + [(lbl, lo, hi) for (lbl, lo, hi) in ODDS_BINS]
+
+        # TOP N values from GUI
+        top_n_values = [0, 1, 2, 3, 4, 5, 10]
+
+        # TOP N types from GUI
+        top_n_types = [
+            "Legjobb +EV",
+            "Legrosszabb +EV",
+            "Legjobb -EV",
+            "Legrosszabb -EV",
+            "Legjobb EV",
+            "Legrosszabb EV",
+        ]
+
+        # System bets from GUI - will be filtered dynamically based on top_n
+
+        # Run optimization
+        best_result = None
+        best_score = (
+            float("-inf")
+            if ("Max" in selected_metric or "Legjobb" in selected_metric)
+            else float("inf")
+        )
+
+        processed = 0
+        valid_combinations = 0  # Track how many pass the 20-day threshold
+
+        for bookmaker_id in bookmaker_ids:
+            for odds_range_name, odds_min, odds_max in odds_ranges:
+                for top_n in top_n_values:
+                    # Determine valid system bets for this top_n value (matching GUI logic)
+                    if top_n == 0 or top_n == 1:
+                        valid_system_bets = ["Egyes kötés"]
+                    elif top_n == 2:
+                        valid_system_bets = ["Egyes kötés", "Teljes kötés", "Teljes + Egyes"]
+                    elif top_n == 3:
+                        valid_system_bets = [
+                            "Egyes kötés",
+                            "Teljes kötés",
+                            "Teljes + Egyes",
+                            "2/3",
+                            "Trixie",
+                            "Patent",
+                        ]
+                    elif top_n == 4:
+                        valid_system_bets = [
+                            "Egyes kötés",
+                            "Teljes kötés",
+                            "Teljes + Egyes",
+                            "2/4",
+                            "3/4",
+                            "Yankee",
+                            "Lucky 15",
+                        ]
+                    elif top_n == 5:
+                        valid_system_bets = [
+                            "Egyes kötés",
+                            "Teljes kötés",
+                            "Teljes + Egyes",
+                            "2/5",
+                            "3/5",
+                            "4/5",
+                            "Canadian",
+                            "Lucky 31",
+                        ]
+                    elif top_n == 10:
+                        valid_system_bets = [
+                            "Egyes kötés",
+                            "Teljes kötés",
+                            "Teljes + Egyes",
+                            "2/10",
+                            "3/10",
+                            "4/10",
+                            "5/10",
+                            "6/10",
+                            "7/10",
+                            "8/10",
+                            "9/10",
+                        ]
+                    else:  # top_n not in predefined list
+                        valid_system_bets = ["Egyes kötés", "Teljes kötés", "Teljes + Egyes"]
+
+                    for top_n_type in top_n_types:
+                        for system_bet in valid_system_bets:
+                            processed += 1
+
+                            # Evaluate this combination
+                            stats = _evaluate_filter_combination(
+                                model_key,
+                                bookmaker_id,
+                                odds_min,
+                                odds_max,
+                                top_n,
+                                top_n_type,
+                                system_bet,
+                                all_matches,
+                                preds_by_match,
+                                odds_by_match,
+                            )
+
+                            # Kiírjuk MINDEN kombinációt
+                            bm_name = "-" if bookmaker_id is None else f"BM#{bookmaker_id}"
+                            if stats is None:
+                                print(
+                                    f"[OPTIMIZER] #{processed}: {bm_name}, {odds_range_name}, {system_bet}, TOP {top_n} ({top_n_type}) → ÉRVÉNYTELEN (nincs adat)"
+                                )
+                                continue
+
+                            if not stats.get("valid", True):
+                                # Érvénytelen de van diagnosztikai info
+                                reason = stats.get("reason", "?")
+                                num_days = stats.get("num_days", 0)
+                                num_bets = stats.get("num_bets", 0)
+                                # Részletes diagnosztika
+                                total = stats.get("total_matches", 0)
+                                skip_pred = stats.get("skipped_no_pred", 0)
+                                skip_odds_bm = stats.get("skipped_no_odds", 0)
+                                skip_odds_range = stats.get("skipped_odds_filter", 0)
+                                days_before = stats.get("days_before_topn", 0)
+                                matches_before = stats.get("matches_before_topn", 0)
+                                print(
+                                    f"[OPTIMIZER] #{processed}: {bm_name}, {odds_range_name}, {system_bet}, TOP {top_n} ({top_n_type})"
+                                )
+                                print(f"            → ÉRVÉNYTELEN: {reason}")
+                                print(
+                                    f"            → Összes meccs: {total}, Predikció hiány: {skip_pred}, Odds hiány: {skip_odds_bm}, Odds szűrés: {skip_odds_range}"
+                                )
+                                print(
+                                    f"            → Szűrés után: {days_before} nap, {matches_before} meccs → Végül: {num_days} nap, {num_bets} fogadás"
+                                )
+                                continue
+
+                            valid_combinations += 1
+
+                            # Érvényes kombináció - részletes kiírás
+                            if selected_metric == "Legjobb (komplex)":
+                                profit = stats["profit"]
+                                win_rate = stats["win_rate"] / 100.0
+                                sharpe = max(0.01, stats["sharpe"])
+                                drawdown = abs(stats["max_dd"])
+                                test_score = (profit * win_rate * sharpe) / (1.0 + drawdown)
+                                print(
+                                    f"[OPTIMIZER] #{processed} (Valid #{valid_combinations}): {bm_name}, {odds_range_name}, {system_bet}, TOP {top_n} ({top_n_type}) → profit={profit:.2f}, wr={win_rate:.2%}, sh={sharpe:.2f}, dd={drawdown:.2f}, score={test_score:.4f}"
+                                )
+                            else:
+                                print(
+                                    f"[OPTIMIZER] #{processed} (Valid #{valid_combinations}): {bm_name}, {odds_range_name}, {system_bet}, TOP {top_n} ({top_n_type}) → bets={stats['num_bets']}, profit={stats['profit']:.2f}"
+                                )
+
+                            # Get score based on selected metric
+                            if selected_metric == "Legjobb (komplex)":
+                                # Complex score: profit * win_rate * sharpe / (1 + abs(drawdown))
+                                # Rewards: high profit, high win rate, good risk-adjusted returns, low drawdown
+                                profit = stats["profit"]
+                                win_rate = stats["win_rate"] / 100.0  # 0-1 scale
+                                sharpe = max(0.01, stats["sharpe"])  # Avoid division issues
+                                drawdown = abs(stats["max_dd"])
+
+                                # Composite score that balances all factors
+                                score = (profit * win_rate * sharpe) / (1.0 + drawdown)
+                            elif selected_metric == "Max Profit":
+                                score = stats["profit"]
+                            elif selected_metric == "Max ROI %":
+                                score = stats["roi"]
+                            elif selected_metric == "Max Nyerési %":
+                                score = stats["win_rate"]
+                            elif selected_metric == "Max Sharpe":
+                                score = stats["sharpe"]
+                            elif selected_metric == "Min Drawdown":
+                                score = -stats["max_dd"]  # Negative for minimization
+                            else:
+                                score = stats["profit"]
+
+                            # Update best
+                            is_better = False
+                            if "Max" in selected_metric or "Legjobb" in selected_metric:
+                                is_better = score > best_score
+                                if valid_combinations <= 3:  # Debug first few
+                                    print(
+                                        f"[OPTIMIZER]   score={score:.4f}, best_score={best_score:.4f}, is_better={is_better}"
+                                    )
+                                if is_better:
+                                    print(
+                                        f"[OPTIMIZER]   → NEW BEST! score={score:.4f} > prev_best={best_score:.4f}"
+                                    )
+                            elif "Min" in selected_metric:
+                                is_better = score > best_score  # Already negated above
+                                if is_better:
+                                    print(
+                                        f"[OPTIMIZER]   → NEW BEST! score={score:.4f} > prev_best={best_score:.4f}"
+                                    )
+
+                            if is_better:
+                                best_score = score
+                                best_result = {
+                                    "bookmaker_id": bookmaker_id,
+                                    "odds_range": odds_range_name,
+                                    "odds_min": odds_min,
+                                    "odds_max": odds_max,
+                                    "top_n": top_n,
+                                    "top_type": top_n_type,
+                                    "system": system_bet,
+                                    "stats": stats,
+                                }
+
+        if best_result is None:
+            print(
+                f"[OPTIMIZER] Nincs érvényes kombináció! Összes próbált: {processed}, 20+ napot elért: {valid_combinations}"
+            )
+            auto_opt_var.set("Ki")
+            _enable_manual_filters(state)
+            return
+
+        print(
+            f"[OPTIMIZER] Legjobb kombináció találva: {best_result['system']}, TOP {best_result['top_n']}, {best_result['top_type']}"
+        )
+        print(
+            f"[OPTIMIZER] Statisztika: {valid_combinations} kombináció elérte a 20 napot {processed} közül"
+        )
+
+        # Apply best filters
+        _apply_filter_settings(state, best_result)
+        _refresh_daily_stats_window(state)
+
+    except Exception as exc:
+        print(f"[GUI] Optimalizálási hiba: {exc}")
+        import traceback
+
+        traceback.print_exc()
+        auto_opt_var.set("Ki")
+        _enable_manual_filters(state)
+
+
+def _disable_manual_filters(state: AppState) -> None:
+    """Disable manual filter controls when auto-optimization is active."""
+    pass  # Filters remain enabled for now
+
+
+def _enable_manual_filters(state: AppState) -> None:
+    """Enable manual filter controls when auto-optimization is turned off."""
+    pass  # Filters remain enabled
+
+
+def _apply_filter_settings(state: AppState, result: dict[str, Any]) -> None:
+    """Apply optimized filter settings to the state."""
+    try:
+        # Bookmaker
+        bm_var = getattr(state, "daily_bm_var", None)
+        if bm_var is not None:
+            if result["bookmaker_id"] is None:
+                bm_var.set("-")  # Legjobb
+            else:
+                # Find bookmaker name
+                bm_map = getattr(state, "bm_names_by_id", None) or {}
+                bm_name = bm_map.get(result["bookmaker_id"], f"BM #{result['bookmaker_id']}")
+                bm_var.set(bm_name)
+
+        # Odds range - use manual if specific range
+        odds_var = getattr(state, "daily_odds_range_var", None)
+        min_odds_var = getattr(state, "daily_min_odds_var", None)
+        max_odds_var = getattr(state, "daily_max_odds_var", None)
+
+        if odds_var is not None:
+            odds_var.set(result["odds_range"])
+
+        if result["odds_min"] is not None and min_odds_var is not None:
+            min_odds_var.set(str(result["odds_min"]))
+        if result["odds_max"] is not None and max_odds_var is not None:
+            max_odds_var.set(str(result["odds_max"]))
+
+        # TOP N
+        top_n_var = getattr(state, "daily_top_n_var", None)
+        if top_n_var is not None:
+            top_n_var.set(str(result["top_n"]) if result["top_n"] > 0 else "-")
+            # Update system bet options based on new TOP N value
+            _update_system_bet_options(state)
+
+        # TOP type
+        top_n_type_var = getattr(state, "daily_top_n_type_var", None)
+        if top_n_type_var is not None:
+            top_n_type_var.set(result["top_type"])
+
+        # System bet - set directly (no mapping needed)
+        system_var = getattr(state, "daily_system_bet_var", None)
+        if system_var is not None:
+            system_var.set(result["system"])
+
+    except Exception as exc:
+        print(f"[GUI] Error applying filter settings: {exc}")
+
+
+def _evaluate_filter_combination(
+    model_key: str,
+    bookmaker_id: int | None,
+    odds_min: float | None,
+    odds_max: float | None,
+    top_n: int,
+    top_n_type: str,
+    system_bet: str,
+    all_matches: list[Any],
+    preds_by_match: (
+        Dict[int, Tuple[float, float, float, str | None]]
+        | Dict[int, Dict[str, Tuple[float, float, float, str | None]]]
+    ),
+    odds_by_match: Dict[int, Dict[int | None, Tuple[float, float, float, str]]],
+) -> Dict[str, Any] | None:
+    """
+    Evaluate a specific filter combination.
+    Returns dict with num_bets, profit, roi, win_rate, sharpe, max_dd.
+    """
+    import numpy as np
+
+    # Group matches by day for system bets
+    matches_by_day: Dict[str, list[Dict[str, Any]]] = {}
+
+    # Diagnostic counters
+    total_processed = 0
+    skipped_no_pred = 0
+    skipped_no_odds = 0
+    skipped_odds_filter = 0
+
+    for match in all_matches:
+        mid, date_str, home, away, result = match
+        total_processed += 1
+
+        # Handle both prediction map formats
+        if mid not in preds_by_match:
+            skipped_no_pred += 1
+            continue
+
+        pred_data = preds_by_match[mid]
+        if isinstance(pred_data, dict):
+            # Old format: {model_key: (ph, pd, pa, pred)}
+            if model_key not in pred_data:
+                skipped_no_pred += 1
+                continue
+            ph, pd, pa, pred = pred_data[model_key]
+        else:
+            # New format: (ph, pd, pa, pred)
+            ph, pd, pa, pred = pred_data
+
+        # Skip if no odds for this bookmaker
+        if mid not in odds_by_match or bookmaker_id not in odds_by_match[mid]:
+            skipped_no_odds += 1
+            continue
+
+        oh, od, oa, _ = odds_by_match[mid][bookmaker_id]
+
+        # Determine bet based on prediction
+        if pred in {"1", "X", "2"}:
+            bet = pred
+        else:
+            vals = [("1", ph), ("X", pd), ("2", pa)]
+            bet, _ = max(vals, key=lambda x: x[1])
+
+        # Get bet probability and odds
+        bet_prob = {"1": ph, "X": pd, "2": pa}[bet]
+        bet_odd = {"1": oh, "X": od, "2": oa}[bet]
+
+        # Apply odds filter
+        if odds_min is not None and bet_odd < odds_min:
+            skipped_odds_filter += 1
+            continue
+        if odds_max is not None and bet_odd > odds_max:
+            skipped_odds_filter += 1
+            continue
+
+        # Calculate EV for top N filtering
+        ev = bet_prob * bet_odd - 1.0
+
+        # Determine if bet won
+        won = result == bet
+
+        # Parse date for grouping
+        try:
+            dt = datetime.fromisoformat(date_str)
+            day_key = dt.strftime("%Y-%m-%d")
+        except Exception:
+            day_key = "unknown"
+
+        if day_key not in matches_by_day:
+            matches_by_day[day_key] = []
+
+        matches_by_day[day_key].append(
+            {
+                "match_id": mid,
+                "bet": bet,
+                "prob": bet_prob,
+                "odd": bet_odd,
+                "ev": ev,
+                "won": won,
+                "result": result,
+            }
+        )
+
+    # Apply top N filter per day
+    days_before_topn = len(matches_by_day)
+    matches_before_topn = sum(len(v) for v in matches_by_day.values())
+
+    if top_n > 0:
+        for day_key in matches_by_day:
+            day_matches = matches_by_day[day_key]
+
+            # Sort by selected criterion
+            if top_n_type == "Legjobb +EV":
+                day_matches.sort(key=lambda m: m["ev"], reverse=True)
+            elif top_n_type == "Legmagasabb odds":
+                day_matches.sort(key=lambda m: m["odd"], reverse=True)
+            elif top_n_type == "Legalacsonyabb odds":
+                day_matches.sort(key=lambda m: m["odd"], reverse=False)
+
+            # Keep only top N
+            matches_by_day[day_key] = day_matches[:top_n]
+
+    # Apply system bet logic
+    all_bets: list[Dict[str, Any]] = []
+    days_with_actual_bets: set[str] = set()  # Track days where bets actually happened
+
+    for day_key, day_matches in matches_by_day.items():
+        if not day_matches:
+            continue
+
+        # Use the existing _calculate_system_bet_profit function for all system types
+        # Convert day_matches format to match what _calculate_system_bet_profit expects
+        match_data = [
+            {
+                "win": m["won"],
+                "odd": m["odd"],
+                "profit": (m["odd"] - 1.0) if m["won"] else -1.0,
+            }
+            for m in day_matches
+        ]
+
+        # Calculate profit using the comprehensive system bet function
+        day_profit = _calculate_system_bet_profit(match_data, system_bet)
+
+        # Determine minimum matches required for this system bet
+        min_matches_required = 1
+        if "/" in system_bet:
+            # Parse "X/Y" format
+            parts = system_bet.split("/")
+            if len(parts) == 2 and parts[1].isdigit():
+                min_matches_required = int(parts[1])
+        elif system_bet in ["Trixie", "Patent"]:
+            min_matches_required = 3
+        elif system_bet in ["Yankee", "Lucky 15"]:
+            min_matches_required = 4
+        elif system_bet in ["Canadian", "Lucky 31"]:
+            min_matches_required = 5
+
+        # Add result to all_bets - but only if valid
+        if system_bet == "Egyes kötés":
+            # For singles, add each bet individually
+            if day_matches:  # Only if there are matches
+                all_bets.extend(day_matches)
+                days_with_actual_bets.add(day_key)
+        else:
+            # For system bets, only add if there are enough matches
+            if len(day_matches) >= min_matches_required and day_profit != 0.0:
+                # Determine if system won based on profit
+                system_won = day_profit > -1.0
+                all_bets.append(
+                    {
+                        "match_id": f"system_{day_key}",
+                        "odd": day_profit + 1.0 if system_won else 1.0,
+                        "won": system_won,
+                        "profit": day_profit,
+                        "is_system": True,
+                    }
+                )
+                days_with_actual_bets.add(day_key)
+
+    num_days = len(days_with_actual_bets)
+    num_bets = len(all_bets)
+
+    # Prepare diagnostic info
+    diag_info = {
+        "total_matches": total_processed,
+        "skipped_no_pred": skipped_no_pred,
+        "skipped_no_odds": skipped_no_odds,
+        "skipped_odds_filter": skipped_odds_filter,
+        "days_before_topn": days_before_topn,
+        "matches_before_topn": matches_before_topn,
+        "days_after_filters": len(matches_by_day),
+        "matches_after_topn": sum(len(v) for v in matches_by_day.values()),
+    }
+
+    # Return invalid result with diagnostic info if conditions not met
+    if not all_bets:
+        return {
+            "valid": False,
+            "num_days": num_days,
+            "num_bets": 0,
+            "reason": "Nincs fogadás",
+            **diag_info,
+        }
+
+    # Minimum 20 days requirement - only count days where bets actually happened
+    if num_days < 20:
+        return {
+            "valid": False,
+            "num_days": num_days,
+            "num_bets": num_bets,
+            "reason": "Kevesebb mint 20 nap",
+            **diag_info,
+        }
+
+    # Calculate statistics
+    num_bets = len(all_bets)
+    wins = sum(1 for b in all_bets if b["won"])
+    win_rate = 100.0 * wins / num_bets
+
+    # Calculate profit
+    total_profit = 0.0
+    for bet_item in all_bets:
+        if "profit" in bet_item:  # System bet
+            total_profit += float(bet_item["profit"])
+        else:  # Single bet
+            if bet_item["won"]:
+                total_profit += float(bet_item["odd"]) - 1.0
+            else:
+                total_profit += -1.0
+
+    roi = 100.0 * total_profit / num_bets
+
+    # Calculate Sharpe ratio (return / std dev)
+    returns: list[float] = []
+    for bet_item in all_bets:
+        if "profit" in bet_item:
+            returns.append(float(bet_item["profit"]))
+        else:
+            returns.append(float(bet_item["odd"]) - 1.0 if bet_item["won"] else -1.0)
+
+    if len(returns) > 1:
+        sharpe = np.mean(returns) / np.std(returns) if np.std(returns) > 0 else 0.0
+    else:
+        sharpe = 0.0
+
+    # Calculate maximum drawdown
+    cumulative = 0.0
+    peak = 0.0
+    max_dd = 0.0
+
+    for ret in returns:
+        cumulative += ret
+        if cumulative > peak:
+            peak = cumulative
+        dd = peak - cumulative
+        if dd > max_dd:
+            max_dd = dd
+
+    return {
+        "valid": True,
+        "num_days": num_days,
+        "num_bets": num_bets,
+        "profit": total_profit,
+        "roi": roi,
+        "win_rate": win_rate,
+        "sharpe": sharpe,
+        "max_dd": max_dd,
+    }
 
 
 def _open_odds_bins_window(state: AppState) -> None:
