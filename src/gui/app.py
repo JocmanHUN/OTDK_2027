@@ -961,21 +961,36 @@ ODDS_BINS = [
 
 EV_BINS = [
     ("EV < -50%", float("-inf"), -0.50),
-    ("-50% .. -40%", -0.50, -0.40),
-    ("-40% .. -30%", -0.40, -0.30),
-    ("-30% .. -20%", -0.30, -0.20),
-    ("-20% .. -10%", -0.20, -0.10),
-    ("-10% .. 0%", -0.10, 0.0),
-    ("0% .. +10%", 0.0, 0.10),
-    ("+10% .. +20%", 0.10, 0.20),
-    ("+20% .. +30%", 0.20, 0.30),
-    ("+30% .. +40%", 0.30, 0.40),
-    ("+40% .. +50%", 0.40, 0.50),
-    ("+50% .. +60%", 0.50, 0.60),
-    ("+60% .. +70%", 0.60, 0.70),
-    ("+70% .. +80%", 0.70, 0.80),
-    ("+80% .. +90%", 0.80, 0.90),
-    ("+90% .. +100%", 0.90, 1.00),
+    ("-50% .. -45%", -0.50, -0.45),
+    ("-45% .. -40%", -0.45, -0.40),
+    ("-40% .. -35%", -0.40, -0.35),
+    ("-35% .. -30%", -0.35, -0.30),
+    ("-30% .. -25%", -0.30, -0.25),
+    ("-25% .. -20%", -0.25, -0.20),
+    ("-20% .. -15%", -0.20, -0.15),
+    ("-15% .. -10%", -0.15, -0.10),
+    ("-10% .. -5%", -0.10, -0.05),
+    ("-5% .. 0%", -0.05, 0.0),
+    ("0% .. +5%", 0.0, 0.05),
+    ("+5% .. +10%", 0.05, 0.10),
+    ("+10% .. +15%", 0.10, 0.15),
+    ("+15% .. +20%", 0.15, 0.20),
+    ("+20% .. +25%", 0.20, 0.25),
+    ("+25% .. +30%", 0.25, 0.30),
+    ("+30% .. +35%", 0.30, 0.35),
+    ("+35% .. +40%", 0.35, 0.40),
+    ("+40% .. +45%", 0.40, 0.45),
+    ("+45% .. +50%", 0.45, 0.50),
+    ("+50% .. +55%", 0.50, 0.55),
+    ("+55% .. +60%", 0.55, 0.60),
+    ("+60% .. +65%", 0.60, 0.65),
+    ("+65% .. +70%", 0.65, 0.70),
+    ("+70% .. +75%", 0.70, 0.75),
+    ("+75% .. +80%", 0.75, 0.80),
+    ("+80% .. +85%", 0.80, 0.85),
+    ("+85% .. +90%", 0.85, 0.90),
+    ("+90% .. +95%", 0.90, 0.95),
+    ("+95% .. +100%", 0.95, 1.00),
     ("+100% .. +150%", 1.00, 1.50),
     ("+150% .. +200%", 1.50, 2.00),
     ("EV >= +200%", 2.00, float("inf")),
@@ -998,6 +1013,7 @@ class AppState:
     upcoming_odds_var: tk.StringVar | None = None
     upcoming_ev_var: tk.StringVar | None = None
     model_visibility: Dict[str, bool] | None = None
+    ev_bins_offset: int = 0  # Offset for scrolling through EV bins (5 at a time)
     model_visibility_vars: Dict[str, tk.BooleanVar] | None = None
     search_var: tk.StringVar | None = None
     sort_by: int | None = None
@@ -1401,13 +1417,20 @@ def _update_model_stats_panel(
         # Store detailed match data for EV bins (for drill-down)
         state.ev_bin_matches = ev_bin_details
 
-        # Update detailed EV-bin table
+        # Update detailed EV-bin table (show 5 bins at a time based on offset)
         ev_tree = getattr(state, "stats_ev_tree", None)
         if ev_tree is not None:
             try:
                 for i in ev_tree.get_children():
                     ev_tree.delete(i)
-                for label, _lo, _hi in EV_BINS:
+
+                # Get offset and calculate which 5 bins to show
+                offset = getattr(state, "ev_bins_offset", 0)
+                start_idx = offset
+                end_idx = min(offset + 5, len(EV_BINS))
+
+                for bin_idx in range(start_idx, end_idx):
+                    label, _lo, _hi = EV_BINS[bin_idx]
                     agg = ev_agg.get(label, {"count": 0, "wins": 0, "profit": 0.0})
                     count = int(agg.get("count", 0) or 0)
                     wins_b = int(agg.get("wins", 0) or 0)
@@ -3054,7 +3077,9 @@ def _compute_league_stats(
     return rows_out, summary
 
 
-def _calculate_system_bet_profit(matches: list[dict[str, Any]], system_type: str) -> float:
+def _calculate_system_bet_profit(
+    matches: list[dict[str, Any]], system_type: str
+) -> tuple[float, bool]:
     """Calculate profit for a system bet (combination) from given matches.
 
     Args:
@@ -3062,18 +3087,18 @@ def _calculate_system_bet_profit(matches: list[dict[str, Any]], system_type: str
         system_type: Type of system bet (e.g., "Egyes kötés", "Teljes kötés", "3/2", etc.)
 
     Returns:
-        Total profit from the system bet
+        Tuple of (total profit, is_fallback) where is_fallback indicates if we fell back to singles
     """
     from itertools import combinations
 
     n = len(matches)
     if n == 0:
-        return 0.0
+        return 0.0, False
 
     # Parse system type
     if system_type == "Egyes kötés":
         # Individual bets (N/1)
-        return sum(float(m.get("profit", 0.0)) for m in matches)
+        return sum(float(m.get("profit", 0.0)) for m in matches), False
 
     elif system_type == "Teljes kötés":
         # Full parlay (N/N)
@@ -3081,9 +3106,9 @@ def _calculate_system_bet_profit(matches: list[dict[str, Any]], system_type: str
             combined_odds = 1.0
             for m in matches:
                 combined_odds *= float(m.get("odd", 1.0))
-            return combined_odds - 1.0
+            return combined_odds - 1.0, False
         else:
-            return -1.0
+            return -1.0, False
 
     elif system_type == "Teljes + Egyes":
         # Full parlay + Singles: N singles + 1 full parlay (N+1 bets total)
@@ -3102,14 +3127,14 @@ def _calculate_system_bet_profit(matches: list[dict[str, Any]], system_type: str
         else:
             total_profit -= 1.0
 
-        return total_profit
+        return total_profit, False
 
     elif system_type == "Trixie":
         # Trixie: 3 doubles + 1 treble (4 bets total)
         # Requires exactly 3 matches - fallback to singles if less
         if n < 3:
             # Not enough matches: use singles (egyes kötés)
-            return sum(float(m.get("profit", 0.0)) for m in matches)
+            return sum(float(m.get("profit", 0.0)) for m in matches), True
 
         total_profit = 0.0
 
@@ -3135,14 +3160,14 @@ def _calculate_system_bet_profit(matches: list[dict[str, Any]], system_type: str
         else:
             total_profit -= 1.0
 
-        return total_profit
+        return total_profit, False
 
     elif system_type == "Patent":
         # Patent: 3 singles + 3 doubles + 1 treble (7 bets total)
         # Requires exactly 3 matches - fallback to singles if less
         if n < 3:
             # Not enough matches: use singles (egyes kötés)
-            return sum(float(m.get("profit", 0.0)) for m in matches)
+            return sum(float(m.get("profit", 0.0)) for m in matches), True
 
         total_profit = 0.0
 
@@ -3172,14 +3197,14 @@ def _calculate_system_bet_profit(matches: list[dict[str, Any]], system_type: str
         else:
             total_profit -= 1.0
 
-        return total_profit
+        return total_profit, False
 
     elif system_type == "Yankee":
         # Yankee: 6 doubles + 4 trebles + 1 four-fold (11 bets total)
         # Requires exactly 4 matches - fallback to singles if less
         if n < 4:
             # Not enough matches: use singles (egyes kötés)
-            return sum(float(m.get("profit", 0.0)) for m in matches)
+            return sum(float(m.get("profit", 0.0)) for m in matches), True
 
         total_profit = 0.0
 
@@ -3215,14 +3240,14 @@ def _calculate_system_bet_profit(matches: list[dict[str, Any]], system_type: str
         else:
             total_profit -= 1.0
 
-        return total_profit
+        return total_profit, False
 
     elif system_type == "Lucky 15":
         # Lucky 15: 4 singles + 6 doubles + 4 trebles + 1 four-fold (15 bets total)
         # Requires exactly 4 matches - fallback to singles if less
         if n < 4:
             # Not enough matches: use singles (egyes kötés)
-            return sum(float(m.get("profit", 0.0)) for m in matches)
+            return sum(float(m.get("profit", 0.0)) for m in matches), True
 
         total_profit = 0.0
 
@@ -3262,14 +3287,14 @@ def _calculate_system_bet_profit(matches: list[dict[str, Any]], system_type: str
         else:
             total_profit -= 1.0
 
-        return total_profit
+        return total_profit, False
 
     elif system_type == "Canadian":
         # Canadian: 10 doubles + 10 trebles + 5 four-folds + 1 five-fold (26 bets total)
         # Requires exactly 5 matches - fallback to singles if less
         if n < 5:
             # Not enough matches: use singles (egyes kötés)
-            return sum(float(m.get("profit", 0.0)) for m in matches)
+            return sum(float(m.get("profit", 0.0)) for m in matches), True
 
         total_profit = 0.0
 
@@ -3315,14 +3340,14 @@ def _calculate_system_bet_profit(matches: list[dict[str, Any]], system_type: str
         else:
             total_profit -= 1.0
 
-        return total_profit
+        return total_profit, False
 
     elif system_type == "Lucky 31":
         # Lucky 31: 5 singles + 10 doubles + 10 trebles + 5 four-folds + 1 five-fold (31 bets total)
         # Requires exactly 5 matches - fallback to singles if less
         if n < 5:
             # Not enough matches: use singles (egyes kötés)
-            return sum(float(m.get("profit", 0.0)) for m in matches)
+            return sum(float(m.get("profit", 0.0)) for m in matches), True
 
         total_profit = 0.0
 
@@ -3372,7 +3397,7 @@ def _calculate_system_bet_profit(matches: list[dict[str, Any]], system_type: str
         else:
             total_profit -= 1.0
 
-        return total_profit
+        return total_profit, False
 
     elif "/" in system_type and not system_type.endswith("(Dupla)"):
         # System bet (e.g., "2/3", "3/4")
@@ -3383,13 +3408,13 @@ def _calculate_system_bet_profit(matches: list[dict[str, Any]], system_type: str
             k = int(parts[0])  # Size of each combination
             _ = int(parts[1])  # Expected number of matches (not used in calculation)
         except (ValueError, IndexError):
-            return 0.0
+            return 0.0, False
 
         # If not enough matches for this combination, fall back to individual
         if k > n:
-            return sum(float(m.get("profit", 0.0)) for m in matches)
+            return sum(float(m.get("profit", 0.0)) for m in matches), True
         if k < 1:
-            return 0.0
+            return 0.0, False
 
         # Generate all combinations of size k
         total_profit = 0.0
@@ -3405,9 +3430,9 @@ def _calculate_system_bet_profit(matches: list[dict[str, Any]], system_type: str
                 # This combination lost
                 total_profit -= 1.0
 
-        return total_profit
+        return total_profit, False
 
-    return 0.0
+    return 0.0, False
 
 
 def _update_system_bet_options(state: AppState) -> None:
@@ -3571,6 +3596,7 @@ def _refresh_daily_stats_window(state: AppState) -> None:
         # Add system profit to rows
         for r in rows:
             r["profit_system"] = r.get("profit_parlay", 0.0)
+            r["is_fallback"] = False  # Full parlay never uses fallback
     elif system_bet_type == "Egyes kötés":
         # Use existing individual calculations
         cumulative_system = list(cumulative)  # Copy to avoid reference issues
@@ -3578,9 +3604,11 @@ def _refresh_daily_stats_window(state: AppState) -> None:
         # Add system profit to rows
         for r in rows:
             r["profit_system"] = r.get("profit", 0.0)
+            r["is_fallback"] = False  # Singles never use fallback
     else:
         # Calculate system bet profit for each day
         daily_system_profits = []
+        daily_combo_wins = []  # Track non-fallback wins
         running_profit = 0.0
         bankroll = getattr(state, "bankroll_amount", None)
 
@@ -3588,11 +3616,20 @@ def _refresh_daily_stats_window(state: AppState) -> None:
             matches = r.get("matches", [])
             if not matches:
                 system_profit = 0.0
+                is_fallback = False
             else:
-                system_profit = _calculate_system_bet_profit(matches, system_bet_type)
+                system_profit, is_fallback = _calculate_system_bet_profit(matches, system_bet_type)
 
             r["profit_system"] = system_profit
+            r["is_fallback"] = is_fallback
             daily_system_profits.append(system_profit)
+
+            # Track combo wins (only if not fallback and profit > 0)
+            if not is_fallback and system_profit > 0:
+                daily_combo_wins.append(1)
+            else:
+                daily_combo_wins.append(0)
+
             running_profit += system_profit
 
             # Build cumulative with same format as existing
@@ -3641,7 +3678,6 @@ def _refresh_daily_stats_window(state: AppState) -> None:
 
         # Calculate overall ROI based on system bet type
         active_total = sum(r.get("profit_system", 0.0) for r in rows)
-        mode_str = f" ({system_bet_type})"
 
         overall_roi = (active_total / total_matches * 100.0) if total_matches > 0 else 0.0
 
@@ -3707,15 +3743,145 @@ def _refresh_daily_stats_window(state: AppState) -> None:
         # Adjust display text based on grouping mode
         period_label = "napok" if grouping_mode_str == "Naponta" else "blokkok"
 
+        # Perfect days and big wins statistics (for all system bet types)
+        perfect_days = 0  # Days with 100% hit rate
+        big_wins = 0  # Perfect days with more than 1 match
+        big_win_indices = []  # Track indices for frequency calculation
+
+        for idx, r in enumerate(rows):
+            matches = r.get("matches", [])
+            if not matches:
+                continue
+
+            # Skip fallback days for combination bets
+            is_fallback = r.get("is_fallback", False)
+            if is_fallback and system_bet_type not in ["Egyes kötés"]:
+                continue
+
+            # Check if all matches won
+            all_won = all(m.get("win", False) for m in matches)
+            if all_won:
+                perfect_days += 1
+                if len(matches) > 1:
+                    big_wins += 1
+                    big_win_indices.append(idx)
+
+        # Calculate average days between big wins
+        avg_days_between_big_wins = None
+        if len(big_win_indices) > 1:
+            # Calculate gaps between consecutive big wins
+            gaps = [
+                big_win_indices[i + 1] - big_win_indices[i] for i in range(len(big_win_indices) - 1)
+            ]
+            avg_days_between_big_wins = sum(gaps) / len(gaps) if gaps else None
+
+        # Build perfect days statistics string
+        perfect_str = f" | 100% napok: {perfect_days} | Nagy győz.: {big_wins}"
+        if avg_days_between_big_wins is not None:
+            perfect_str += f" (átlag: {avg_days_between_big_wins:.1f} nap)"
+        elif big_wins == 1:
+            perfect_str += " (egyszer)"
+        elif big_wins == 0:
+            perfect_str += " (soha)"
+
+        # Combination win statistics (only for non-singles system bets)
+        combo_win_str = ""
+        if system_bet_type not in ["Egyes kötés"]:
+            # Count non-fallback wins
+            combo_wins = sum(
+                1
+                for r in rows
+                if r.get("profit_system", 0.0) > 0 and not r.get("is_fallback", False)
+            )
+            total_non_fallback_days = sum(1 for r in rows if not r.get("is_fallback", False))
+
+            # Calculate average frequency of combo wins
+            if combo_wins > 0 and total_non_fallback_days > 0:
+                avg_frequency = total_non_fallback_days / combo_wins
+                combo_win_str = f" | Kombó győz.: {combo_wins}/{total_non_fallback_days} ({combo_wins/total_non_fallback_days*100:.1f}%) | Átlag: {avg_frequency:.1f} nap"
+            elif total_non_fallback_days > 0:
+                combo_win_str = f"Kombó győz.: 0/{total_non_fallback_days} (0.0%)"
+            else:
+                combo_win_str = "Kombó győz.: N/A (csak fallback)"
+
+        # Update info label (compact version)
         if info_var is not None:
             info_var.set(
-                f"Modell: {model_label} | Fogadóiroda: {bm_label} | Meccsek: {total_matches} | "
-                f"Csoportosítás: {grouping_mode_str} ({total_days} {period_label}) | "
-                f"Összprofit: {active_total:+.2f} | ROI: {overall_roi:+.2f}%{mode_str} | "
-                f"Szórás: {std_str} | Max DD: {dd_str} | Win Rate: {win_rate:.1f}% | "
-                f"Sharpe: {sharpe_str} | Sortino: {sortino_str} | PF: {profit_factor_str} | "
-                f"Recovery: {recovery_factor_str} | Max Win: {largest_win_str}"
+                f"Modell: {model_label} | Fogadóiroda: {bm_label} | "
+                f"Csoportosítás: {grouping_mode_str} | Fogadás típus: {system_bet_type}"
             )
+
+        # Update detailed statistics panel
+        stats_text_widget = getattr(state, "daily_stats_text", None)
+        if stats_text_widget is not None:
+            try:
+                stats_text_widget.config(state="normal")
+                stats_text_widget.delete("1.0", tk.END)
+
+                # Build formatted statistics text
+                stats_lines = [
+                    "═══ ALAPADATOK ═══",
+                    f"Modell: {model_label}",
+                    f"Fogadóiroda: {bm_label}",
+                    f"Fogadás típus: {system_bet_type}",
+                    f"Csoportosítás: {grouping_mode_str}",
+                    f"Periódusok: {total_days} {period_label}",
+                    f"Meccsek száma: {total_matches}",
+                    "",
+                    "═══ PROFITABILITÁS ═══",
+                    f"Összprofit: {active_total:+.2f}",
+                    f"ROI: {overall_roi:+.2f}%",
+                    f"Win Rate: {win_rate:.1f}%",
+                    "",
+                    "═══ KOCKÁZAT ═══",
+                    f"Szórás: {std_str}",
+                    f"Max Drawdown: {dd_str}",
+                    f"Sharpe Ratio: {sharpe_str}",
+                    f"Sortino Ratio: {sortino_str}",
+                    f"Profit Factor: {profit_factor_str}",
+                    f"Recovery Factor: {recovery_factor_str}",
+                    "",
+                    "═══ TALÁLATI ARÁNY ═══",
+                    f"100% napok: {perfect_days}",
+                    f"Nagy győzelmek: {big_wins}",
+                ]
+
+                if avg_days_between_big_wins is not None:
+                    stats_lines.append(f"  Átlag köztük: {avg_days_between_big_wins:.1f} nap")
+                elif big_wins == 1:
+                    stats_lines.append("  (egyszer)")
+                elif big_wins == 0:
+                    stats_lines.append("  (soha)")
+
+                stats_lines.append(f"Legnagyobb napi nyeremény: {largest_win_str}")
+
+                # Add combination statistics if applicable
+                if combo_win_str:
+                    stats_lines.append("")
+                    stats_lines.append("═══ KOMBINÁCIÓ ═══")
+                    if combo_wins > 0 and total_non_fallback_days > 0:
+                        avg_frequency = total_non_fallback_days / combo_wins
+                        stats_lines.append(f"Győzelmek: {combo_wins}/{total_non_fallback_days}")
+                        stats_lines.append(f"Arány: {combo_wins/total_non_fallback_days*100:.1f}%")
+                        stats_lines.append(f"Átlagos gyakoriság: {avg_frequency:.1f} nap")
+                    else:
+                        stats_lines.append(combo_win_str)
+
+                # Insert text with formatting
+                stats_text_widget.insert("1.0", "\n".join(stats_lines))
+
+                # Apply some basic formatting
+                stats_text_widget.tag_configure("header", font=("Consolas", 9, "bold"))
+
+                # Tag headers
+                content = stats_text_widget.get("1.0", tk.END)
+                for line_num, line in enumerate(content.split("\n"), 1):
+                    if line.startswith("═══"):
+                        stats_text_widget.tag_add("header", f"{line_num}.0", f"{line_num}.end")
+
+                stats_text_widget.config(state="disabled")
+            except Exception as e:
+                print(f"[GUI] Error updating stats text: {e}")
     except Exception:
         if info_var is not None:
             info_var.set("Napi statisztika")
@@ -4203,9 +4369,28 @@ def _open_daily_stats_window(state: AppState) -> None:
         bm_combo.pack(side=tk.LEFT, padx=(0, 0))
         bm_combo.bind("<<ComboboxSelected>>", lambda _e: _refresh_daily_stats_window(state))
 
+        # Main content area: left side (table+chart) and right side (stats panel)
+        content_frame = ttk.Frame(win)
+        content_frame.grid(row=3, column=0, columnspan=2, sticky="nsew", padx=6, pady=(0, 6))
+
+        # Left side: Table and Chart
+        left_frame = ttk.Frame(content_frame)
+        left_frame.pack(side=tk.LEFT, fill="both", expand=True, padx=(0, 6))
+
+        # Right side: Statistics panel
+        right_frame = ttk.LabelFrame(content_frame, text="Részletes statisztikák", padding=10)
+        right_frame.pack(side=tk.RIGHT, fill="both", padx=(0, 0))
+
+        # Create a text widget for statistics display
+        stats_text = tk.Text(
+            right_frame, width=35, height=25, wrap=tk.WORD, font=("Consolas", 9), state="disabled"
+        )
+        stats_text.pack(fill="both", expand=True)
+        state.daily_stats_text = stats_text  # type: ignore[attr-defined]
+
         # Table and Chart layout side-by-side
-        table_frame = ttk.Frame(win)
-        table_frame.grid(row=3, column=0, columnspan=2, sticky="nsew", padx=6, pady=(0, 6))
+        table_frame = ttk.Frame(left_frame)
+        table_frame.pack(fill="both", expand=True, pady=(0, 6))
 
         cols = (
             "D\u00e1tum",
@@ -4257,8 +4442,8 @@ def _open_daily_stats_window(state: AppState) -> None:
         state.daily_stats_tree = tv
 
         # Chart frame - fully responsive
-        chart_frame = ttk.Frame(win)
-        chart_frame.grid(row=4, column=0, columnspan=2, sticky="nsew", padx=6, pady=(0, 6))
+        chart_frame = ttk.Frame(left_frame)
+        chart_frame.pack(fill="both", expand=True)
         try:
             # Clean any half-loaded matplotlib modules to avoid circular import remnants
             import sys
@@ -4317,8 +4502,7 @@ def _open_daily_stats_window(state: AppState) -> None:
         # Let rows grow properly: filters compact, table and chart expand
         win.grid_rowconfigure(1, weight=0)  # filter row 1 - compact
         win.grid_rowconfigure(2, weight=0)  # filter row 2 - compact
-        win.grid_rowconfigure(3, weight=1)  # table
-        win.grid_rowconfigure(4, weight=3)  # chart larger
+        win.grid_rowconfigure(3, weight=1)  # content area (table, chart, stats)
         win.grid_columnconfigure(0, weight=1)
         state.daily_stats_window = win
 
@@ -5284,7 +5468,7 @@ def _evaluate_filter_combination(
         ]
 
         # Calculate profit using the comprehensive system bet function
-        day_profit = _calculate_system_bet_profit(match_data, system_bet)
+        day_profit, is_fallback = _calculate_system_bet_profit(match_data, system_bet)
 
         # Determine minimum matches required for this system bet
         min_matches_required = 1
@@ -5795,7 +5979,8 @@ def refresh_table(state: AppState, *, allow_network: bool = True) -> None:
             if not ev_cell:
                 ev_cell = "-"
             values.append(best_text)
-            # Append EV cell right after the tip-odds column
+
+            # EV column
             values.append(ev_cell)
 
             # Kelly stakes columns (stake + expected profit) only if positive EV and bankroll provided
@@ -5818,8 +6003,9 @@ def refresh_table(state: AppState, *, allow_network: bool = True) -> None:
                 cols_tuple = cast(Tuple[str, ...], state.tree["columns"])
                 if any(c == "Best odds" for c in cols_tuple):
                     values.append("")
-                # EV column placeholder
-                if any(c == "EV" for c in cols_tuple):
+                if any(c == "EV sáv" for c in cols_tuple):
+                    values.append("")
+                if any(c == "EV sáv" for c in cols_tuple):
                     values.append("")
                 # Kelly column placeholders (only if bankroll set)
                 if state.bankroll_amount is not None:
@@ -6441,9 +6627,9 @@ def run_app() -> None:
     columns_base = ["D\u00e1tum", "Meccs", "Eredm\u00e9ny"] + list(MODEL_HEADERS.values())
     columns_all = columns_base + ["H odds", "D odds", "V odds"]
     tree = ttk.Treeview(root, columns=columns_all, show="headings")
-    # Extend columns with odds-shopping column
+    # Extend columns with odds-shopping column and EV column
     BEST_ODDS_COL = "Best odds"
-    EV_COL = "EV"
+    EV_COL = "EV sáv"
     KELLY_COL = "Kelly"
     KELLY_HALF_COL = "Kelly 1/2"
     KELLY_Q_COL = "Kelly 1/4"
@@ -6537,7 +6723,7 @@ def run_app() -> None:
             width = 200
         elif col in ("D\u00e1tum",):
             width = 120
-        elif col == EV_COL:
+        elif col == "EV sáv":
             width = 70
         elif col in (KELLY_COL, KELLY_HALF_COL, KELLY_Q_COL):
             width = 130
@@ -6667,7 +6853,7 @@ def run_app() -> None:
             row=len(labels) + 1, column=0, columnspan=2, sticky="nsew", padx=6, pady=(0, 4)
         )
         state.stats_ev_totals_tree = ev_totals_tree
-        # EV-bin table (detailed EV ranges)
+        # EV-bin table (detailed EV ranges) - with pagination (5 rows at a time)
         ev_cols = ("EV sáv", "Találati arány", "Minta", "ROI")
         ev_frame = ttk.Frame(stats_frame)
         ev_frame.grid(
@@ -6675,8 +6861,9 @@ def run_app() -> None:
         )
         ev_frame.grid_columnconfigure(0, weight=1)
         ev_frame.grid_rowconfigure(0, weight=1)
-        ev_height = min(len(EV_BINS), 10)  # keep viewport manageable, use scrollbar for the rest
-        ev_tree = ttk.Treeview(ev_frame, columns=ev_cols, show="headings", height=ev_height)
+
+        # Create EV table with fixed height of 5 rows
+        ev_tree = ttk.Treeview(ev_frame, columns=ev_cols, show="headings", height=5)
         for idx, col in enumerate(ev_cols):
             anchor_val_ev: Literal["center", "w"] = "w" if idx == 0 else "center"
             width = 120 if idx == 0 else 90
@@ -6687,10 +6874,28 @@ def run_app() -> None:
             ev_tree.tag_configure("roi_neg", foreground="#8b0000")
         except Exception:
             pass
-        ev_scroll = ttk.Scrollbar(ev_frame, orient="vertical", command=ev_tree.yview)
-        ev_tree.configure(yscrollcommand=ev_scroll.set)
+
+        # Add scroll buttons frame
+        ev_btn_frame = ttk.Frame(ev_frame)
+        ev_btn_frame.grid(row=1, column=0, sticky="ew", pady=(3, 0))
+
+        def _scroll_ev_stats(direction: int) -> None:
+            """Scroll EV stats table by direction (-1 for previous, +1 for next)"""
+            max_offset = len(EV_BINS) - 5
+            state.ev_bins_offset = max(0, min(max_offset, state.ev_bins_offset + direction))
+            refresh_table(state, allow_network=False)
+
+        ev_prev_stats_btn = ttk.Button(
+            ev_btn_frame, text="◄ Előző", command=lambda: _scroll_ev_stats(-1)
+        )
+        ev_prev_stats_btn.pack(side=tk.LEFT, padx=(0, 6))
+
+        ev_next_stats_btn = ttk.Button(
+            ev_btn_frame, text="Következő ►", command=lambda: _scroll_ev_stats(+1)
+        )
+        ev_next_stats_btn.pack(side=tk.LEFT)
+
         ev_tree.grid(row=0, column=0, sticky="nsew")
-        ev_scroll.grid(row=0, column=1, sticky="ns")
         state.stats_ev_tree = ev_tree
 
         # Add double-click event handler for EV bins
@@ -7130,7 +7335,7 @@ def run_app() -> None:
                 try:
                     if state.selected_model_key is not None:
                         tree.heading(BEST_ODDS_COL, text=name or "Tip odds")
-                        tree.heading(EV_COL, text="EV")
+                        # EV columns handled separately in played view
                 except Exception:
                     pass
             else:
@@ -7140,8 +7345,7 @@ def run_app() -> None:
                 try:
                     if state.selected_model_key is not None:
                         tree.heading(BEST_ODDS_COL, text="Best odds")
-                        # When no bookmaker is selected, show BEST EV header
-                        tree.heading(EV_COL, text="BEST EV")
+                        # EV columns handled separately in played view
                 except Exception:
                     pass
         except Exception:
@@ -7179,6 +7383,7 @@ def run_app() -> None:
                 # When a single model is selected, show the tip-odds column and EV
                 if "BEST_ODDS_COL" in locals():
                     display.append(BEST_ODDS_COL)
+                # Add EV column
                 if "EV_COL" in locals():
                     display.append(EV_COL)
                 if state.bankroll_amount is not None:
